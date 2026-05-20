@@ -1,0 +1,44 @@
+/* app/App.css */
+
+.app-shell {
+  display: flex;
+  min-height: 100vh;
+  width: 100%;
+  position: relative;
+}
+
+.app-main {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  z-index: 1; /* Sits above the watermark logo background */
+}
+
+/* Watermark logo background */
+.app-bg-watermark {
+  position: fixed;
+  top: 50%;
+  left: calc(var(--sidebar-width) + (100% - var(--sidebar-width)) / 2);
+  transform: translate(-50%, -50%);
+  background-repeat: no-repeat;
+  background-position: center;
+  pointer-events: none;
+  z-index: 0; /* Sits behind sidebar and main content */
+  filter: blur(2px); /* Soft blur effect for aesthetic blend */
+  transition: opacity var(--transition-normal) ease;
+}
+
+.app-bg-watermark--icon {
+  width: 600px;
+  height: 600px;
+  background-size: contain;
+}
+
+.app-bg-watermark--banner {
+  width: 800px;
+  height: 450px;
+  background-size: contain;
+}
