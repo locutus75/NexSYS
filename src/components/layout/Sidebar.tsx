@@ -1,9 +1,4 @@
-/**
- * components/layout/Sidebar.tsx
- * Main navigation sidebar with all 21 NexSYS destinations.
- * Collapsible on narrow viewports.
- */
-
+import { useState, useEffect } from "react";
 import { NavLink } from "react-router-dom";
 import { NetworkBadge } from "./NetworkBadge";
 import "./Sidebar.css";
@@ -33,6 +28,22 @@ const NAV_ITEMS: NavItem[] = [
 ];
 
 export function Sidebar() {
+  const [appVersion, setAppVersion] = useState("v0.1.0-mvp1");
+
+  useEffect(() => {
+    import("@tauri-apps/api/core")
+      .then(({ isTauri }) => {
+        if (isTauri()) {
+          import("@tauri-apps/api/app")
+            .then(({ getVersion }) => {
+              getVersion().then((ver) => setAppVersion(`v${ver}`));
+            })
+            .catch((err) => console.error("Error loading app version:", err));
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   return (
     <nav className="sidebar" aria-label="Main navigation">
       {/* Logo / Brand */}
@@ -70,7 +81,7 @@ export function Sidebar() {
 
       {/* Footer */}
       <div className="sidebar__footer">
-        <span className="text-muted text-xs">v0.1.0-mvp1</span>
+        <span className="text-muted text-xs">{appVersion}</span>
       </div>
     </nav>
   );
