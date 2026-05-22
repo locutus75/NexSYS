@@ -64,6 +64,6 @@ jobs:
           tagName: v__VERSION__ # Automatically uses the version from tauri.conf.json
           releaseName: 'NexSYS v__VERSION__'
           releaseBody: 'NexSYS Command Center update. See assets below for platform-specific installation files.'
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
