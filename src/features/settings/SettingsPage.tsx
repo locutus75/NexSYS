@@ -31,11 +31,69 @@ export function SettingsPage() {
     return localStorage.getItem("nexsys_bg_logo_type") || "icon";
   });
 
+  const [appVersion, setAppVersion] = useState<string>("0.1.0");
+  const [updateStatus, setUpdateStatus] = useState<"idle" | "checking" | "no-update" | "available" | "downloading" | "installing" | "done" | "error">("idle");
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [updateManifest, setUpdateManifest] = useState<any>(null);
+
   useEffect(() => {
     import("@tauri-apps/api/core").then(({ isTauri }) => {
       setInTauri(isTauri());
     }).catch(() => setInTauri(false));
   }, []);
+
+  useEffect(() => {
+    if (inTauri) {
+      import("@tauri-apps/api/app").then(({ getVersion }) => {
+        getVersion().then(setAppVersion);
+      }).catch((err) => console.error("Error loading app version:", err));
+    }
+  }, [inTauri]);
+
+  async function handleCheckForUpdates() {
+    setUpdateStatus("checking");
+    setUpdateError(null);
+    setUpdateManifest(null);
+
+    try {
+      const { check } = await import("@tauri-apps/plugin-updater");
+      const update = await check();
+
+      if (update) {
+        setUpdateStatus("available");
+        setUpdateManifest(update);
+      } else {
+        setUpdateStatus("no-update");
+      }
+    } catch (err: any) {
+      console.error("[Updater] Check failed:", err);
+      setUpdateStatus("error");
+      setUpdateError(err?.message || String(err));
+    }
+  }
+
+  async function handleInstallUpdate() {
+    if (!updateManifest) return;
+    setUpdateStatus("downloading");
+    setUpdateError(null);
+
+    try {
+      await updateManifest.downloadAndInstall((event: any) => {
+        if (event && event.event === "Started") {
+          setUpdateStatus("downloading");
+        } else if (event && event.event === "Finished") {
+          setUpdateStatus("installing");
+        }
+      });
+
+      const { relaunch } = await import("@tauri-apps/plugin-process");
+      await relaunch();
+    } catch (err: any) {
+      console.error("[Updater] Install failed:", err);
+      setUpdateStatus("error");
+      setUpdateError(err?.message || String(err));
+    }
+  }
 
   function handleChange(key: keyof RpcConfig, value: string | number | boolean) {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -320,6 +378,90 @@ export function SettingsPage() {
             </>
           )}
         </div>
+      </div>
+
+      {/* App Updates & Versioning */}
+      <div className="card mt-6" style={{ maxWidth: 560 }}>
+        <div className="stat-label mb-4">App Updates & Versioning</div>
+        <p className="text-sm text-secondary mb-5">
+          Manage application releases, check current version, and download secure updates.
+        </p>
+
+        {inTauri === false ? (
+          <WarningBox severity="info" className="mb-2">
+            Updates are managed by the operating system or the desktop wrapper. Launch the NexSYS desktop app to check for updates.
+          </WarningBox>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-4)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span className="text-sm font-semibold text-white">Current Version</span>
+              <span className="badge" style={{ backgroundColor: "var(--color-bg-tertiary)", color: "var(--color-accent)", padding: "2px 8px", borderRadius: "4px", fontSize: "0.85rem", fontWeight: "bold" }}>
+                v{appVersion}
+              </span>
+            </div>
+
+            {updateStatus === "checking" && (
+              <WarningBox severity="info" className="mt-2 animate-pulse">
+                🔍 Checking the update servers for new releases...
+              </WarningBox>
+            )}
+
+            {updateStatus === "no-update" && (
+              <WarningBox severity="success" className="mt-2">
+                ✓ Your application is up to date! You are running the latest version.
+              </WarningBox>
+            )}
+
+            {updateStatus === "error" && (
+              <WarningBox severity="danger" title="Update Check Failed" className="mt-2">
+                {updateError || "An error occurred while checking for updates. Please try again later or check your internet connection."}
+              </WarningBox>
+            )}
+
+            {updateStatus === "available" && updateManifest && (
+              <div className="card" style={{ backgroundColor: "rgba(255, 255, 255, 0.02)", border: "1px solid rgba(255, 255, 255, 0.05)", padding: "var(--space-4)", borderRadius: "6px" }}>
+                <div className="text-sm font-bold text-success mb-2">📢 New Update Available: v{updateManifest.version}</div>
+                {updateManifest.date && <div className="text-xs text-muted mb-3">Released on: {new Date(updateManifest.date).toLocaleDateString()}</div>}
+                {updateManifest.body && (
+                  <div className="text-xs text-secondary mb-4" style={{ maxHeight: "150px", overflowY: "auto", padding: "var(--space-3)", backgroundColor: "rgba(0, 0, 0, 0.2)", borderRadius: "4px", whiteSpace: "pre-wrap", fontFamily: "var(--font-mono, monospace)" }}>
+                    {updateManifest.body}
+                  </div>
+                )}
+                <button className="btn btn-primary w-full" onClick={handleInstallUpdate}>
+                  Download & Install Update
+                </button>
+              </div>
+            )}
+
+            {updateStatus === "downloading" && (
+              <WarningBox severity="info" className="mt-2">
+                <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  <div className="spinner" />
+                  <span>Downloading package updates... Please do not close NexSYS.</span>
+                </div>
+              </WarningBox>
+            )}
+
+            {updateStatus === "installing" && (
+              <WarningBox severity="success" className="mt-2">
+                <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  <div className="spinner" />
+                  <span>Installing update. Relaunching NexSYS...</span>
+                </div>
+              </WarningBox>
+            )}
+
+            {updateStatus !== "checking" && updateStatus !== "downloading" && updateStatus !== "installing" && updateStatus !== "available" && (
+              <button
+                id="check-updates-btn"
+                className="btn btn-secondary w-full"
+                onClick={handleCheckForUpdates}
+              >
+                Check for Updates
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Utilities & Support */}
