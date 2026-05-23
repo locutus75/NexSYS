@@ -28,6 +28,7 @@ import {
 import { executeUtxoToNevmBridge, fetchSpvProof } from "../../services/bridgeService";
 import { submitSpvProofToNevm } from "../../services/evmBridgeService";
 import type { ChainEnvironment } from "../../types/chain";
+import type { RawWalletInfoFull } from "../../services/syscoinRpcClient";
 import "./BridgePage.css";
 
 // ── Route definitions ─────────────────────────────────────────────────────────
@@ -181,6 +182,15 @@ export function BridgePage() {
   const [passDialogError, setPassDialogError] = useState<string | null>(null);
   const [pendingClaimRecord, setPendingClaimRecord] = useState<BridgeRecord | null>(null);
 
+  // UTXO Wallet lock & status state
+  const [walletInfo, setWalletInfo] = useState<RawWalletInfoFull | null>(null);
+  const [walletStatusError, setWalletStatusError] = useState<string | null>(null);
+  const [unlockDialogOpen, setUnlockDialogOpen] = useState(false);
+  const [passphrase, setPassphrase] = useState("");
+  const [unlockTimeout, setUnlockTimeout] = useState("300");
+  const [unlockError, setUnlockError] = useState<string | null>(null);
+  const [unlocking, setUnlocking] = useState(false);
+
   const route = ROUTES.find(r => r.id === selectedRoute)!;
   const allChecked = SAFETY_CHECKS.every(c => checks[c.id]);
   const amountNum = parseFloat(amount);
@@ -203,6 +213,51 @@ export function BridgePage() {
       setFeeEst(parseFloat((res.value.feerate * 0.00025).toFixed(8)));
     }
   }, [rpcClient, route.source]);
+
+  // Fetch UTXO wallet status (lock/unlock state)
+  const fetchWalletStatus = useCallback(async () => {
+    const res = await rpcClient.getWalletInfoFull();
+    if (res.ok) {
+      setWalletInfo(res.value);
+      setWalletStatusError(null);
+    } else {
+      setWalletStatusError(res.error.message);
+    }
+  }, [rpcClient]);
+
+  const handleUnlock = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setUnlocking(true);
+    setUnlockError(null);
+    try {
+      const res = await rpcClient.call<null>("walletpassphrase", [
+        passphrase,
+        parseInt(unlockTimeout, 10),
+      ]);
+      if (res.ok) {
+        setUnlockDialogOpen(false);
+        setPassphrase("");
+        fetchWalletStatus();
+      } else {
+        setUnlockError(res.error.message);
+      }
+    } catch (err) {
+      setUnlockError(err instanceof Error ? err.message : "Failed to unlock");
+    } finally {
+      setUnlocking(false);
+    }
+  };
+
+  const handleLock = async () => {
+    try {
+      const res = await rpcClient.call<null>("walletlock");
+      if (res.ok) {
+        fetchWalletStatus();
+      }
+    } catch (err) {
+      console.error("Lock failed:", err);
+    }
+  };
 
   // Background polling for confirmations
   useEffect(() => {
@@ -255,6 +310,7 @@ export function BridgePage() {
     fetchBalance();
     fetchFee();
     refreshHistory();
+    fetchWalletStatus();
     // Reset dest address to saved EVM address when switching to UTXO→NEVM
     if (route.dest === "SYSCOIN_NEVM" || route.dest === "ROLLUX") {
       setDestAddress(evmAddress);
@@ -265,7 +321,7 @@ export function BridgePage() {
     setAmount("");
     setBridgeError(null);
     setLastTxid(null);
-  }, [selectedRoute, fetchBalance, fetchFee, refreshHistory, evmAddress, route.dest]);
+  }, [selectedRoute, fetchBalance, fetchFee, refreshHistory, evmAddress, route.dest, fetchWalletStatus]);
 
   // ── Native bridge execution ───────────────────────────────────────────────
 
@@ -652,7 +708,14 @@ export function BridgePage() {
                 id="bridge-submit-btn"
                 className="btn btn-primary w-full"
                 disabled={!canBridge || bridging}
-                onClick={() => setConfirmOpen(true)}
+                onClick={() => {
+                  if (route.source === "SYSCOIN_NATIVE_UTXO" && walletInfo && walletInfo.unlocked_until === 0) {
+                    setUnlockError("Ontgrendel uw Syscoin UTXO Node Wallet om door te gaan met bridgen.");
+                    setUnlockDialogOpen(true);
+                    return;
+                  }
+                  setConfirmOpen(true);
+                }}
               >
                 {bridging
                   ? <><div className="spinner" /> Bridging…</>
@@ -664,6 +727,70 @@ export function BridgePage() {
 
         {/* ── Right: info panel ────────────────────────────────────────────── */}
         <div className="flex flex-col gap-4">
+          {route.source === "SYSCOIN_NATIVE_UTXO" && (
+            <div className="card animate-fade-in">
+              <div className="stat-label mb-3">Syscoin UTXO Node Wallet Status</div>
+              {walletStatusError ? (
+                <p className="text-xs text-danger">{walletStatusError}</p>
+              ) : walletInfo === null ? (
+                <div className="flex items-center gap-2">
+                  <div className="spinner" />
+                  <span className="text-muted text-xs">Loading status…</span>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-secondary">Encryption:</span>
+                    {walletInfo.unlocked_until === undefined ? (
+                      <span className="badge badge-success text-xs" style={{ background: "rgba(34, 197, 94, 0.15)", color: "#22c55e", padding: "2px 6px", borderRadius: "3px" }}>Unencrypted</span>
+                    ) : (
+                      <span className="badge badge-warning text-xs" style={{ background: "rgba(245, 158, 11, 0.15)", color: "#f59e0b", padding: "2px 6px", borderRadius: "3px" }}>Encrypted</span>
+                    )}
+                  </div>
+                  {walletInfo.unlocked_until !== undefined && (
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs text-secondary">Status:</span>
+                      {walletInfo.unlocked_until === 0 ? (
+                        <span className="text-danger font-semibold text-xs flex items-center gap-1">
+                          🔒 Locked
+                        </span>
+                      ) : (
+                        <span className="text-success font-semibold text-xs flex items-center gap-1">
+                          🔓 Unlocked
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  {walletInfo.unlocked_until !== undefined && walletInfo.unlocked_until > 0 && (
+                    <div className="text-xs text-muted mt-1" style={{ textAlign: "right" }}>
+                      Expires: {new Date(walletInfo.unlocked_until * 1000).toLocaleTimeString()}
+                    </div>
+                  )}
+                  
+                  {walletInfo.unlocked_until === 0 && (
+                    <button
+                      className="btn btn-primary btn-sm mt-3 w-full"
+                      onClick={() => {
+                        setUnlockError(null);
+                        setUnlockDialogOpen(true);
+                      }}
+                    >
+                      Unlock Node Wallet
+                    </button>
+                  )}
+                  {walletInfo.unlocked_until !== undefined && walletInfo.unlocked_until > 0 && (
+                    <button
+                      className="btn btn-secondary btn-sm mt-3 w-full"
+                      onClick={handleLock}
+                    >
+                      Lock Node Wallet
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="card">
             <div className="stat-label mb-3">Bridge Routes</div>
             {ROUTES.map(r => (
@@ -919,14 +1046,18 @@ export function BridgePage() {
 
       <ConfirmDialog
         open={passDialogOpen}
-        title="Sign Bridge Transaction"
+        title="Ontgrendel EVM Wallet (NEVM/Rollux)"
         description={
           <div>
-            <p className="mb-4">Enter your Master Password to sign and broadcast the NEVM claim transaction.</p>
+            <p className="mb-4" style={{ fontSize: "0.85rem", color: "var(--color-text-secondary)" }}>
+              Voer uw <strong>EVM Master Wachtwoord</strong> in om uw opgeslagen EVM-referenties te decrypten en de claim-transactie op de NEVM/Rollux chain te ondertekenen.
+              <br /><br />
+              <span className="text-accent" style={{ fontWeight: 500 }}>💡 Let op: Dit is het in-app wachtwoord dat u hebt ingesteld in de Settings, <em>niet</em> het Syscoin UTXO Node Wachtwoord.</span>
+            </p>
             <input
               type="password"
               className="input input-mono w-full"
-              placeholder="Master Password"
+              placeholder="EVM Master Wachtwoord"
               value={passDialogPassword}
               onChange={(e) => {
                 setPassDialogPassword(e.target.value);
@@ -946,8 +1077,8 @@ export function BridgePage() {
             )}
           </div>
         }
-        confirmLabel={claimingId ? "Claiming..." : "Confirm & Sign"}
-        cancelLabel="Cancel"
+        confirmLabel={claimingId ? "Bezig met claimen..." : "Signeer & Claim"}
+        cancelLabel="Annuleren"
         onConfirm={handlePasswordSubmit}
         onCancel={() => {
           setPassDialogOpen(false);
@@ -956,6 +1087,79 @@ export function BridgePage() {
           setPendingClaimRecord(null);
         }}
       />
+
+      {unlockDialogOpen && (
+        <div className="dialog-overlay" onClick={() => setUnlockDialogOpen(false)} role="presentation">
+          <form
+            className="dialog animate-fade-in"
+            onSubmit={handleUnlock}
+            onClick={(e) => e.stopPropagation()}
+            style={{ width: "100%", maxWidth: "420px" }}
+          >
+            <div className="dialog__header">
+              <span className="dialog__icon">🔑</span>
+              <h3 className="dialog__title">Ontgrendel Syscoin Core Node Wallet (UTXO)</h3>
+            </div>
+            <p className="dialog__desc" style={{ marginBottom: "var(--space-4)", fontSize: "0.85rem", color: "var(--color-text-secondary)" }}>
+              Voer uw <strong>Syscoin UTXO Node Wachtwoord</strong> in om uw lokale Syscoin Core portemonnee te ontgrendelen voor de burn-transactie.
+              <br /><br />
+              <span className="text-warning" style={{ fontWeight: 500 }}>⚠️ Let op: Dit is de passphrase van uw lokale Syscoin Core node wallet, <em>niet</em> het EVM Master Wachtwoord.</span>
+            </p>
+            
+            <div className="form-group" style={{ textAlign: "left", width: "100%", marginBottom: "var(--space-3)" }}>
+              <label className="form-label" htmlFor="bridge-unlock-passphrase">Syscoin UTXO Node Wachtwoord (Passphrase)</label>
+              <input
+                id="bridge-unlock-passphrase"
+                className="input"
+                type="password"
+                required
+                value={passphrase}
+                onChange={(e) => setPassphrase(e.target.value)}
+                placeholder="Passphrase van de Syscoin Core Node"
+                autoFocus
+              />
+            </div>
+
+            <div className="form-group" style={{ textAlign: "left", width: "100%", marginBottom: "var(--space-4)" }}>
+              <label className="form-label" htmlFor="bridge-unlock-timeout">Geldigheidsduur (seconden)</label>
+              <input
+                id="bridge-unlock-timeout"
+                className="input"
+                type="number"
+                min="10"
+                max="999999"
+                value={unlockTimeout}
+                onChange={(e) => setUnlockTimeout(e.target.value)}
+                placeholder="300"
+              />
+            </div>
+
+            {unlockError && (
+              <WarningBox severity="danger" title="Ontgrendeling mislukt" className="mb-4">
+                {unlockError}
+              </WarningBox>
+            )}
+
+            <div className="dialog__actions">
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setUnlockDialogOpen(false)}
+                disabled={unlocking}
+              >
+                Annuleren
+              </button>
+              <button
+                type="submit"
+                className="btn btn-primary"
+                disabled={unlocking}
+              >
+                {unlocking ? "Ontgrendelen…" : "Ontgrendel Wallet"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 }
