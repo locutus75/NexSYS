@@ -14,6 +14,8 @@ interface Props {
   confirmLabel?: string;
   cancelLabel?: string;
   danger?: boolean;
+  confirmDisabled?: boolean;
+  cancelDisabled?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -25,6 +27,8 @@ export function ConfirmDialog({
   confirmLabel = "Confirm",
   cancelLabel = "Cancel",
   danger = false,
+  confirmDisabled = false,
+  cancelDisabled = false,
   onConfirm,
   onCancel,
 }: Props) {
@@ -33,11 +37,11 @@ export function ConfirmDialog({
   // Close on Escape
   useEffect(() => {
     function handleKey(e: KeyboardEvent) {
-      if (e.key === "Escape" && open) onCancel();
+      if (e.key === "Escape" && open && !cancelDisabled) onCancel();
     }
     document.addEventListener("keydown", handleKey);
     return () => document.removeEventListener("keydown", handleKey);
-  }, [open, onCancel]);
+  }, [open, onCancel, cancelDisabled]);
 
   // Trap focus inside dialog when open
   useEffect(() => {
@@ -47,7 +51,7 @@ export function ConfirmDialog({
   if (!open) return null;
 
   return (
-    <div className="dialog-overlay" onClick={onCancel} role="presentation">
+    <div className="dialog-overlay" onClick={cancelDisabled ? undefined : onCancel} role="presentation">
       <div
         className="dialog"
         ref={dialogRef}
@@ -68,6 +72,7 @@ export function ConfirmDialog({
             id="dialog-cancel"
             className="btn btn-secondary"
             onClick={onCancel}
+            disabled={cancelDisabled}
           >
             {cancelLabel}
           </button>
@@ -75,6 +80,7 @@ export function ConfirmDialog({
             id="dialog-confirm"
             className={`btn ${danger ? "btn-danger" : "btn-primary"}`}
             onClick={onConfirm}
+            disabled={confirmDisabled}
           >
             {confirmLabel}
           </button>

@@ -26,14 +26,14 @@ import {
   type BridgeRecord,
 } from "../../services/bridgeHistoryService";
 import { executeUtxoToNevmBridge, fetchSpvProof } from "../../services/bridgeService";
-import { submitSpvProofToNevm } from "../../services/evmBridgeService";
+import { submitSpvProofToNevm, depositEthToRollux } from "../../services/evmBridgeService";
 import type { ChainEnvironment } from "../../types/chain";
 import type { RawWalletInfoFull } from "../../services/syscoinRpcClient";
 import "./BridgePage.css";
 
 // ── Route definitions ─────────────────────────────────────────────────────────
 
-type RouteId = "utxo_nevm" | "nevm_utxo" | "nevm_rollux" | "rollux_nevm";
+type RouteId = "utxo_nevm" | "utxo_rollux" | "nevm_utxo" | "nevm_rollux" | "rollux_nevm";
 
 interface BridgeRoute {
   id: RouteId;
@@ -58,9 +58,20 @@ const ROUTES: BridgeRoute[] = [
     sourceLabel: "Syscoin Native (UTXO)",
     destLabel: "Syscoin NEVM",
     native: true,
-    estimatedTime: "~2 minutes (on-chain confirmation)",
-    feeNote: "Standard Syscoin network fee (~0.0001 SYS)",
-    warning: "This is a one-way burn transaction. SYS will be destroyed on the UTXO layer and minted on NEVM. Ensure your NEVM address is correct — this cannot be reversed.",
+    estimatedTime: "~2 minuten (on-chain bevestiging)",
+    feeNote: "Standaard Syscoin netwerkkosten (~0.0001 SYS)",
+    warning: "Dit is een eenrichtingstransactie. SYS wordt vernietigd op de UTXO-laag en aangemaakt op NEVM. Controleer het NEVM-adres — dit is onomkeerbaar.",
+  },
+  {
+    id: "utxo_rollux",
+    source: "SYSCOIN_NATIVE_UTXO",
+    dest: "ROLLUX",
+    sourceLabel: "Syscoin Native (UTXO)",
+    destLabel: "Rollux L2",
+    native: true,
+    estimatedTime: "~15–30 minuten (UTXO burn + NEVM claim + Rollux deposit)",
+    feeNote: "Syscoin UTXO-kosten + NEVM-gaskosten",
+    warning: "Tweestaps proces: (1) SYS wordt gebrand op UTXO en geclaimd op NEVM via SPV-bewijs. (2) Geclaimde SYS wordt automatisch gestort op Rollux L2. Controleer het Rollux-adres zorgvuldig.",
   },
   {
     id: "nevm_utxo",
@@ -181,6 +192,8 @@ export function BridgePage() {
   const [passDialogPassword, setPassDialogPassword] = useState("");
   const [passDialogError, setPassDialogError] = useState<string | null>(null);
   const [pendingClaimRecord, setPendingClaimRecord] = useState<BridgeRecord | null>(null);
+  const [claimStep, setClaimStep] = useState<string | null>(null);
+  const [claimBlockInfo, setClaimBlockInfo] = useState<string | null>(null);
 
   // UTXO Wallet lock & status state
   const [walletInfo, setWalletInfo] = useState<RawWalletInfoFull | null>(null);
@@ -389,45 +402,177 @@ export function BridgePage() {
       try {
         const proof = await fetchSpvProof(rpcClient, activeNetwork as "MAINNET" | "TESTNET", rec.txid);
         const evmTxHash = await submitSpvProofToNevm(proof, activeNetwork);
-        updateBridgeRecord(activeNetwork, rec.id, { 
-          status: "completed",
-          statusMessage: `Claimed on NEVM (TX: ${evmTxHash.slice(0, 10)}...)`
-        });
+
+        if (rec.destChain === "ROLLUX") {
+          // After NEVM claim, deposit minted SYS into Rollux L2
+          updateBridgeRecord(activeNetwork, rec.id, {
+            status: "released",
+            statusMessage: `SYS geclaimd op NEVM (TX: ${evmTxHash.slice(0, 10)}...). Storten op Rollux L2...`
+          });
+          refreshHistory();
+
+          const l2TxHash = await depositEthToRollux(
+            rec.amount,
+            rec.destAddress,
+            activeNetwork
+          );
+          updateBridgeRecord(activeNetwork, rec.id, {
+            status: "completed",
+            statusMessage: `Gestort op Rollux L2 (TX: ${l2TxHash.slice(0, 10)}...)`
+          });
+        } else {
+          updateBridgeRecord(activeNetwork, rec.id, {
+            status: "completed",
+            statusMessage: `Geclaimd op NEVM (TX: ${evmTxHash.slice(0, 10)}...)`
+          });
+        }
         refreshHistory();
       } catch (err: any) {
         console.error("Claim failed:", err);
-        setClaimError(`Claim failed: ${err.message}`);
+        setClaimError(`Claim mislukt: ${err.message}`);
       } finally {
         setClaimingId(null);
       }
     }
   }, [rpcClient, activeNetwork, refreshHistory]);
 
+  const resolveTxDetails = async (txid: string): Promise<{ amount: string }> => {
+    const MAINNET_BLOCKBOOK = "https://blockbook.syscoin.org";
+    const TESTNET_BLOCKBOOK = "https://blockbook-testnet.syscoin.org";
+    try {
+      // 1. Try local wallet gettransaction
+      const txRes = await rpcClient.call<any>("gettransaction", [txid]);
+      if (txRes.ok && txRes.value) {
+        const amt = Math.abs(txRes.value.amount || 0);
+        const fee = Math.abs(txRes.value.fee || 0);
+        if (amt > 0) {
+          const calculated = amt - fee;
+          return { amount: calculated.toFixed(8) };
+        }
+      }
+
+      // 2. Try getrawtransaction verbose
+      const rawRes = await rpcClient.call<any>("getrawtransaction", [txid, 1]);
+      if (rawRes.ok && rawRes.value) {
+        const vout = rawRes.value.vout || [];
+        
+        // Find nulldata/OP_RETURN output
+        const opReturnOut = vout.find((o: any) => 
+          o.scriptPubKey && 
+          (o.scriptPubKey.type === "nulldata" || 
+           (o.scriptPubKey.asm && o.scriptPubKey.asm.startsWith("OP_RETURN")))
+        );
+
+        if (opReturnOut) {
+          if (opReturnOut.value > 0) {
+            return { amount: opReturnOut.value.toFixed(8) };
+          }
+          
+          // If value is 0, it might be a SYSX burn. Let's inspect the vout for Syscoin-specific fields.
+          for (const o of vout) {
+            if (o.scriptPubKey && o.scriptPubKey.assetAllocation) {
+              const allocationAmount = o.scriptPubKey.assetAllocation.amount;
+              if (allocationAmount) {
+                return { amount: (parseFloat(allocationAmount) / 1e8).toFixed(8) };
+              }
+            }
+          }
+        }
+      }
+
+      // 3. Fallback to Blockbook API
+      const blockbookUrl = activeNetwork === "MAINNET" ? MAINNET_BLOCKBOOK : TESTNET_BLOCKBOOK;
+      const isBrowserDev = typeof window !== "undefined" && !(window as any).__TAURI__;
+      let txUrl = `${blockbookUrl}/api/v2/tx/${txid}`;
+      if (isBrowserDev) {
+        txUrl = `/rpc-proxy/api/v2/tx/${txid}?target=${encodeURIComponent(blockbookUrl)}`;
+      }
+      const fetchRes = await fetch(txUrl);
+      if (fetchRes.ok) {
+        const txData = await fetchRes.json();
+        if (txData.value) {
+          const valSys = (parseFloat(txData.value) / 1e8).toFixed(8);
+          if (txData.tokenTransfers && txData.tokenTransfers.length > 0) {
+            const transfer = txData.tokenTransfers[0];
+            if (transfer.value) {
+              const decimals = transfer.decimals || 8;
+              const valToken = (parseFloat(transfer.value) / Math.pow(10, decimals)).toFixed(8);
+              return { amount: valToken };
+            }
+          }
+          return { amount: valSys };
+        }
+      }
+    } catch (err) {
+      console.warn("Failed to resolve tx details:", err);
+    }
+    return { amount: "Unknown" };
+  };
+
   async function handlePasswordSubmit() {
     if (!pendingClaimRecord || !passDialogPassword) return;
     setPassDialogError(null);
     setClaimingId(pendingClaimRecord.id);
+    const rec = pendingClaimRecord;
 
     try {
       // 1. Decrypt private key
+      setClaimStep("decrypting");
       const decryptedPrivKey = await decryptPrivateKey(passDialogPassword);
 
-      // 2. Submit proof
-      const proof = await fetchSpvProof(rpcClient, activeNetwork as "MAINNET" | "TESTNET", pendingClaimRecord.txid!);
-      const evmTxHash = await submitSpvProofToNevm(proof, activeNetwork, decryptedPrivKey);
+      // 2. Fetch proof
+      setClaimStep("fetching_proof");
+      const proof = await fetchSpvProof(rpcClient, activeNetwork as "MAINNET" | "TESTNET", rec.txid!);
 
-      updateBridgeRecord(activeNetwork, pendingClaimRecord.id, { 
-        status: "completed",
-        statusMessage: `Claimed on NEVM (TX: ${evmTxHash.slice(0, 10)}...)`
-      });
+      // 3. Submit proof (relayTx)
+      const evmTxHash = await submitSpvProofToNevm(
+        proof,
+        activeNetwork,
+        decryptedPrivKey,
+        (step) => setClaimStep(step),
+        (info) => setClaimBlockInfo(info)
+      );
+      setClaimBlockInfo(null); // clear after relayTx confirms
+
+      if (rec.destChain === "ROLLUX") {
+        // 4. Deposit minted NEVM SYS into Rollux L2
+        updateBridgeRecord(activeNetwork, rec.id, {
+          status: "released",
+          statusMessage: `SYS geclaimd op NEVM (TX: ${evmTxHash.slice(0, 10)}...). Storten op Rollux L2...`
+        });
+        refreshHistory();
+
+        setClaimStep("depositing_rollux");
+        const l2TxHash = await depositEthToRollux(
+          rec.amount,
+          rec.destAddress,
+          activeNetwork,
+          decryptedPrivKey,
+          (step) => setClaimStep(step === "broadcasting" ? "depositing_rollux" : step === "mining" ? "mining_rollux" : step),
+          (info) => setClaimBlockInfo(info)
+        );
+        setClaimBlockInfo(null); // clear after deposit confirms
+        updateBridgeRecord(activeNetwork, rec.id, {
+          status: "completed",
+          statusMessage: `Gestort op Rollux L2 (TX: ${l2TxHash.slice(0, 10)}...)`
+        });
+      } else {
+        updateBridgeRecord(activeNetwork, rec.id, {
+          status: "completed",
+          statusMessage: `Geclaimd op NEVM (TX: ${evmTxHash.slice(0, 10)}...)`
+        });
+      }
       refreshHistory();
 
       // Clean up
       setPassDialogOpen(false);
       setPassDialogPassword("");
       setPendingClaimRecord(null);
+      setClaimStep(null);
+      setClaimBlockInfo(null);
     } catch (err: any) {
       console.error("In-app claim failed:", err);
+      setClaimStep(null);
       if (err.message && (err.message.includes("decryption") || err.message.includes("Padding") || err.message.includes("mac") || err.message.includes("bad decrypt"))) {
         setPassDialogError("Incorrect master password. Decryption failed.");
       } else {
@@ -848,22 +993,29 @@ export function BridgePage() {
                 />
                 <button 
                   className="btn btn-primary btn-sm"
-                  onClick={() => {
+                  onClick={async () => {
                     if (resumeTxid) {
                       const recordId = makeBridgeId();
+                      const txidClean = resumeTxid.trim();
                       addBridgeRecord(activeNetwork, {
                         id: recordId,
                         timestamp: Date.now(),
                         network: activeNetwork,
                         sourceChain: "SYSCOIN_NATIVE_UTXO",
                         destChain: "SYSCOIN_NEVM",
-                        amount: "Unknown",
+                        amount: "Loading...",
                         destAddress: evmAddress,
-                        txid: resumeTxid.trim(),
+                        txid: txidClean,
                         status: "waiting_bridge"
                       });
                       setResumeTxid("");
                       setShowResumeInput(false);
+                      refreshHistory();
+
+                      const { amount: resolvedAmount } = await resolveTxDetails(txidClean);
+                      updateBridgeRecord(activeNetwork, recordId, {
+                        amount: resolvedAmount
+                      });
                       refreshHistory();
                     }
                   }}
@@ -1046,37 +1198,109 @@ export function BridgePage() {
 
       <ConfirmDialog
         open={passDialogOpen}
-        title="Ontgrendel EVM Wallet (NEVM/Rollux)"
-        description={
-          <div>
-            <p className="mb-4" style={{ fontSize: "0.85rem", color: "var(--color-text-secondary)" }}>
-              Voer uw <strong>EVM Master Wachtwoord</strong> in om uw opgeslagen EVM-referenties te decrypten en de claim-transactie op de NEVM/Rollux chain te ondertekenen.
-              <br /><br />
-              <span className="text-accent" style={{ fontWeight: 500 }}>💡 Let op: Dit is het in-app wachtwoord dat u hebt ingesteld in de Settings, <em>niet</em> het Syscoin UTXO Node Wachtwoord.</span>
-            </p>
-            <input
-              type="password"
-              className="input input-mono w-full"
-              placeholder="EVM Master Wachtwoord"
-              value={passDialogPassword}
-              onChange={(e) => {
-                setPassDialogPassword(e.target.value);
-                setPassDialogError(null);
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && passDialogPassword && !claimingId) {
-                  handlePasswordSubmit();
-                }
-              }}
-              autoFocus
-            />
-            {passDialogError && (
-              <div className="text-danger text-xs mt-2 font-semibold">
-                ⚠️ {passDialogError}
+        title={claimingId ? "Bridge wordt uitgevoerd..." : "Ontgrendel EVM Wallet (NEVM/Rollux)"}
+        cancelDisabled={!!claimingId}
+        confirmDisabled={!!claimingId || !passDialogPassword}
+        description={(() => {
+          // Helper: determine the display state of a step
+          const STEP_ORDER = [
+            "decrypting", "fetching_proof", "broadcasting", "mining",
+            ...(pendingClaimRecord?.destChain === "ROLLUX" ? ["depositing_rollux", "mining_rollux"] : [])
+          ];
+          const activeIdx = STEP_ORDER.indexOf(claimStep || "");
+          const stepState = (key: string): "active" | "done" | "pending" => {
+            const idx = STEP_ORDER.indexOf(key);
+            if (claimStep === key) return "active";
+            if (activeIdx > idx) return "done";
+            return "pending";
+          };
+          const stepIcon = (key: string) => {
+            const s = stepState(key);
+            if (s === "active") return <div className="spinner" style={{ width: "14px", height: "14px", borderWidth: "2px", flexShrink: 0 }} />;
+            if (s === "done") return <span style={{ color: "var(--color-success, #4ade80)", fontSize: "1rem", lineHeight: 1, flexShrink: 0 }}>✓</span>;
+            return <span style={{ color: "var(--color-text-muted)", fontSize: "0.9rem", lineHeight: 1, flexShrink: 0 }}>○</span>;
+          };
+          const stepColor = (key: string) => {
+            const s = stepState(key);
+            if (s === "active") return "var(--color-accent)";
+            if (s === "done") return "var(--color-text)";
+            return "var(--color-text-muted)";
+          };
+
+          const StepRow = ({ stepKey, label }: { stepKey: string; label: string }) => (
+            <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "10px", color: stepColor(stepKey), fontWeight: stepState(stepKey) === "active" ? 600 : 400 }}>
+                {stepIcon(stepKey)}
+                <span>{label}</span>
               </div>
-            )}
-          </div>
-        }
+              {/* Block progress shown below the active mining step */}
+              {claimBlockInfo && (claimStep === "mining" && stepKey === "mining" || claimStep === "mining_rollux" && stepKey === "mining_rollux") && (
+                <div style={{ marginLeft: "24px", fontSize: "0.72rem", color: "var(--color-text-muted)", fontFamily: "monospace", marginTop: "2px" }}>
+                  ⛓ {claimBlockInfo}
+                </div>
+              )}
+            </div>
+          );
+
+          if (claimingId) {
+            // ── PROCESSING MODE: show only steps ──────────────────────────────
+            return (
+              <div style={{ padding: "4px 0" }}>
+                <div style={{
+                  display: "flex", flexDirection: "column", gap: "14px",
+                  padding: "16px", borderRadius: "8px",
+                  backgroundColor: "rgba(0,0,0,0.2)",
+                  border: "1px solid rgba(255,255,255,0.06)"
+                }}>
+                  <StepRow stepKey="decrypting"       label="Stap 1: EVM-referenties decrypten..." />
+                  <StepRow stepKey="fetching_proof"   label="Stap 2: SPV-bewijs ophalen van de node..." />
+                  <StepRow stepKey="broadcasting"     label="Stap 3: SPV-proof verzenden naar NEVM (relayTx)..." />
+                  <StepRow stepKey="mining"           label="Stap 4: Wachten op NEVM-bevestiging..." />
+                  {pendingClaimRecord?.destChain === "ROLLUX" && (
+                    <>
+                      <StepRow stepKey="depositing_rollux" label="Stap 5: Storten op Rollux L2 (depositETHTo)..." />
+                      <StepRow stepKey="mining_rollux"     label="Stap 6: Wachten op Rollux L2-bevestiging..." />
+                    </>
+                  )}
+                </div>
+              </div>
+            );
+          }
+
+          // ── INPUT MODE: show password form ────────────────────────────────
+          return (
+            <div>
+              <p className="mb-4" style={{ fontSize: "0.85rem", color: "var(--color-text-secondary)" }}>
+                Voer uw <strong>EVM Master Wachtwoord</strong> in om uw opgeslagen EVM-referenties te decrypten en de claim-transactie op de NEVM/Rollux chain te ondertekenen.
+                <br /><br />
+                <span className="text-accent" style={{ fontWeight: 500 }}>💡 Let op: Dit is het in-app wachtwoord dat u hebt ingesteld in de Settings, <em>niet</em> het Syscoin UTXO Node Wachtwoord.</span>
+              </p>
+              <input
+                type="password"
+                className="input input-mono w-full"
+                placeholder="EVM Master Wachtwoord"
+                value={passDialogPassword}
+                disabled={false}
+                onChange={(e) => {
+                  setPassDialogPassword(e.target.value);
+                  setPassDialogError(null);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && passDialogPassword) {
+                    handlePasswordSubmit();
+                  }
+                }}
+                autoFocus
+              />
+              {passDialogError && (
+                <div className="text-danger text-xs mt-2 font-semibold">
+                  ⚠️ {passDialogError}
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
         confirmLabel={claimingId ? "Bezig met claimen..." : "Signeer & Claim"}
         cancelLabel="Annuleren"
         onConfirm={handlePasswordSubmit}
@@ -1085,6 +1309,8 @@ export function BridgePage() {
           setPassDialogPassword("");
           setPassDialogError(null);
           setPendingClaimRecord(null);
+          setClaimStep(null);
+          setClaimBlockInfo(null);
         }}
       />
 

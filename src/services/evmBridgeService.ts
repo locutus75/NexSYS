@@ -2,7 +2,7 @@
  * services/evmBridgeService.ts
  * Interacts with MetaMask and the Syscoin NEVM contracts for the Bridge Claim phase.
  */
-import { BrowserProvider, Contract, sha256, getBytes, JsonRpcProvider, Wallet } from "ethers";
+import { BrowserProvider, Contract, sha256, getBytes, JsonRpcProvider, Wallet, parseEther } from "ethers";
 import { EVM_RPC } from "./evmRpcClient";
 
 // ABI placeholder for the Syscoin Vault Manager to get the trusted relayer
@@ -14,6 +14,22 @@ const SYSCOIN_VAULT_MANAGER_ABI = [
 const RELAYER_CONTRACT_ABI = [
   "function relayTx(uint64 _blockNumber, bytes _txBytes, uint256 _txIndex, uint256[] _txSiblings, bytes _syscoinBlockHeader) external returns (uint256)"
 ];
+
+// ABI for the Rollux L1StandardBridge (depositETHTo)
+const L1_STANDARD_BRIDGE_ABI = [
+  "function depositETHTo(address _to, uint32 _l2Gas, bytes calldata _data) external payable"
+];
+
+// L1StandardBridgeProxy addresses on Syscoin NEVM
+// Source: https://github.com/SYS-Labs/rollux/tree/develop/packages/contracts-bedrock/deployments
+const L1_STANDARD_BRIDGE_ADDRESS: Record<string, string> = {
+  MAINNET: "0x9cc66f9B7b07F72a487FF751a7cBE281976fce7C",
+  // TODO: replace with official Tanenbaum testnet address once confirmed
+  TESTNET: "0x9cc66f9B7b07F72a487FF751a7cBE281976fce7C",
+};
+
+/** Minimum L2 gas limit for ETH deposits via the Rollux Standard Bridge */
+const ROLLUX_L2_DEPOSIT_GAS = 200_000;
 
 // Provided by the user
 const SYSCOIN_VAULT_MANAGER_ADDRESS = "0x7904299b3D3dC1b03d1DdEb45E9fDF3576aCBd5f";
@@ -126,7 +142,9 @@ export async function ensureNevmNetwork(): Promise<BrowserProvider> {
 export async function submitSpvProofToNevm(
   proofData: any,
   network: string,
-  privateKey?: string
+  privateKey?: string,
+  onStatusUpdate?: (status: string) => void,
+  onBlockUpdate?: (info: string) => void
 ): Promise<string> {
   let signer;
   let provider;
@@ -215,6 +233,7 @@ export async function submitSpvProofToNevm(
     }
 
     // 6. Submit the transaction to relayTx
+    if (onStatusUpdate) onStatusUpdate("broadcasting");
     tx = await relayerContract.relayTx(
       nevmBlockNumber,
       txBytes,
@@ -223,7 +242,28 @@ export async function submitSpvProofToNevm(
       syscoinBlockHeader
     );
 
-    const receipt = await tx.wait();
+    if (onStatusUpdate) onStatusUpdate("mining");
+
+    // Poll for block progress while waiting for confirmation
+    let startBlock: number;
+    try { startBlock = await provider.getBlockNumber(); } catch { startBlock = 0; }
+    let blockPoller: ReturnType<typeof setInterval> | null = null;
+    if (onBlockUpdate && startBlock > 0) {
+      blockPoller = setInterval(async () => {
+        try {
+          const current = await provider.getBlockNumber();
+          const elapsed = current - startBlock;
+          onBlockUpdate(`Block #${current.toLocaleString()} (${elapsed} blok${elapsed !== 1 ? 'ken' : ''} verstreken)...`);
+        } catch { /* ignore polling errors */ }
+      }, 3000);
+    }
+
+    let receipt;
+    try {
+      receipt = await tx.wait();
+    } finally {
+      if (blockPoller) clearInterval(blockPoller);
+    }
     return receipt.hash;
   } catch (error: any) {
     console.error("EVM Submission Error:", error);
@@ -246,5 +286,95 @@ export async function submitSpvProofToNevm(
       );
     }
     throw new Error(`Failed to submit proof to NEVM Relayer: ${error.message}`);
+  }
+}
+
+/**
+ * Submits a depositETHTo transaction to the Rollux L1StandardBridgeProxy on Syscoin NEVM,
+ * moving the minted SYS from NEVM Layer 1 into Rollux Layer 2.
+ *
+ * @param amountSys      - Amount of SYS to deposit (in SYS, as a string)
+ * @param toAddress      - The L2 address that should receive the funds on Rollux
+ * @param network        - Network environment ("MAINNET" | "TESTNET")
+ * @param privateKey     - Optional private key for in-app wallet; omit to use browser wallet
+ * @param onStatusUpdate - Optional callback to report status phase (broadcasting/mining)
+ * @param onBlockUpdate  - Optional callback to report block-level progress during mining
+ */
+export async function depositEthToRollux(
+  amountSys: string,
+  toAddress: string,
+  network: string,
+  privateKey?: string,
+  onStatusUpdate?: (status: string) => void,
+  onBlockUpdate?: (info: string) => void
+): Promise<string> {
+  let signer;
+  let provider;
+
+  if (privateKey) {
+    const rpcEndpoints = EVM_RPC[network] || EVM_RPC.MAINNET;
+    const rpcUrl = rpcEndpoints.nevm;
+    if (!rpcUrl) {
+      throw new Error(`No NEVM RPC URL configured for network: ${network}`);
+    }
+    provider = new JsonRpcProvider(rpcUrl);
+    const keyWithPrefix = privateKey.startsWith("0x") ? privateKey : `0x${privateKey}`;
+    signer = new Wallet(keyWithPrefix, provider);
+  } else {
+    const browserProvider = await ensureNevmNetwork();
+    provider = browserProvider;
+    signer = await browserProvider.getSigner();
+  }
+
+  const bridgeAddress = L1_STANDARD_BRIDGE_ADDRESS[network] ?? L1_STANDARD_BRIDGE_ADDRESS.MAINNET;
+  if (!bridgeAddress) {
+    throw new Error(`No L1StandardBridgeProxy address configured for network: ${network}`);
+  }
+
+  const bridge = new Contract(bridgeAddress, L1_STANDARD_BRIDGE_ABI, signer);
+
+  const amountWei = parseEther(amountSys);
+
+  try {
+    if (onStatusUpdate) onStatusUpdate("broadcasting");
+    const tx = await bridge.depositETHTo(
+      toAddress,
+      ROLLUX_L2_DEPOSIT_GAS,
+      "0x", // empty _data
+      { value: amountWei }
+    );
+    if (onStatusUpdate) onStatusUpdate("mining");
+
+    // Poll for block progress while waiting for confirmation
+    let startBlock: number;
+    try { startBlock = await provider.getBlockNumber(); } catch { startBlock = 0; }
+    let blockPoller: ReturnType<typeof setInterval> | null = null;
+    if (onBlockUpdate && startBlock > 0) {
+      blockPoller = setInterval(async () => {
+        try {
+          const current = await provider.getBlockNumber();
+          const elapsed = current - startBlock;
+          onBlockUpdate(`Block #${current.toLocaleString()} (${elapsed} blok${elapsed !== 1 ? 'ken' : ''} verstreken)...`);
+        } catch { /* ignore polling errors */ }
+      }, 3000);
+    }
+
+    let receipt;
+    try {
+      receipt = await tx.wait();
+    } finally {
+      if (blockPoller) clearInterval(blockPoller);
+    }
+    return receipt.hash;
+  } catch (error: any) {
+    console.error("Rollux depositETHTo Error:", error);
+    const errMsg = error.message || "";
+    if (errMsg.includes("insufficient funds")) {
+      throw new Error(
+        `Insufficient SYS balance to deposit ${amountSys} SYS into Rollux L2. ` +
+        `Ensure you have enough NEVM SYS for both the deposit and the gas fee.`
+      );
+    }
+    throw new Error(`Failed to deposit ETH to Rollux: ${error.message}`);
   }
 }
