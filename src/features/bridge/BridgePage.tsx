@@ -156,7 +156,7 @@ const CHAIN_LABELS: Record<ChainEnvironment, string> = {
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export function BridgePage() {
-  const { rpcClient, activeNetwork, evmAddress, evmPrivateKey } = useNetworkStore();
+  const { rpcClient, activeNetwork, evmAddress, isCredentialsSaved, decryptPrivateKey } = useNetworkStore();
 
   const [selectedRoute, setSelectedRoute] = useState<RouteId>("utxo_nevm");
   const [amount, setAmount] = useState("");
@@ -174,6 +174,12 @@ export function BridgePage() {
   const [resumeTxid, setResumeTxid] = useState("");
   const [copiedTxid, setCopiedTxid] = useState<string | null>(null);
   const [claimError, setClaimError] = useState<string | null>(null);
+
+  // Password Prompt Modal State
+  const [passDialogOpen, setPassDialogOpen] = useState(false);
+  const [passDialogPassword, setPassDialogPassword] = useState("");
+  const [passDialogError, setPassDialogError] = useState<string | null>(null);
+  const [pendingClaimRecord, setPendingClaimRecord] = useState<BridgeRecord | null>(null);
 
   const route = ROUTES.find(r => r.id === selectedRoute)!;
   const allChecked = SAFETY_CHECKS.every(c => checks[c.id]);
@@ -315,24 +321,66 @@ export function BridgePage() {
   // ── Claim Execution ───────────────────────────────────────────────────────
   const handleClaim = useCallback(async (rec: BridgeRecord, useInAppWallet: boolean) => {
     if (!rec.txid) return;
-    setClaimingId(rec.id);
-    setClaimError(null);
+
+    if (useInAppWallet) {
+      setPendingClaimRecord(rec);
+      setPassDialogPassword("");
+      setPassDialogError(null);
+      setPassDialogOpen(true);
+    } else {
+      setClaimingId(rec.id);
+      setClaimError(null);
+      try {
+        const proof = await fetchSpvProof(rpcClient, activeNetwork as "MAINNET" | "TESTNET", rec.txid);
+        const evmTxHash = await submitSpvProofToNevm(proof, activeNetwork);
+        updateBridgeRecord(activeNetwork, rec.id, { 
+          status: "completed",
+          statusMessage: `Claimed on NEVM (TX: ${evmTxHash.slice(0, 10)}...)`
+        });
+        refreshHistory();
+      } catch (err: any) {
+        console.error("Claim failed:", err);
+        setClaimError(`Claim failed: ${err.message}`);
+      } finally {
+        setClaimingId(null);
+      }
+    }
+  }, [rpcClient, activeNetwork, refreshHistory]);
+
+  async function handlePasswordSubmit() {
+    if (!pendingClaimRecord || !passDialogPassword) return;
+    setPassDialogError(null);
+    setClaimingId(pendingClaimRecord.id);
+
     try {
-      const proof = await fetchSpvProof(rpcClient, activeNetwork as "MAINNET" | "TESTNET", rec.txid);
-      const keyToUse = useInAppWallet ? evmPrivateKey : undefined;
-      const evmTxHash = await submitSpvProofToNevm(proof, activeNetwork, keyToUse);
-      updateBridgeRecord(activeNetwork, rec.id, { 
+      // 1. Decrypt private key
+      const decryptedPrivKey = await decryptPrivateKey(passDialogPassword);
+
+      // 2. Submit proof
+      const proof = await fetchSpvProof(rpcClient, activeNetwork as "MAINNET" | "TESTNET", pendingClaimRecord.txid!);
+      const evmTxHash = await submitSpvProofToNevm(proof, activeNetwork, decryptedPrivKey);
+
+      updateBridgeRecord(activeNetwork, pendingClaimRecord.id, { 
         status: "completed",
         statusMessage: `Claimed on NEVM (TX: ${evmTxHash.slice(0, 10)}...)`
       });
       refreshHistory();
+
+      // Clean up
+      setPassDialogOpen(false);
+      setPassDialogPassword("");
+      setPendingClaimRecord(null);
     } catch (err: any) {
-      console.error("Claim failed:", err);
-      setClaimError(`Claim failed: ${err.message}`);
+      console.error("In-app claim failed:", err);
+      if (err.message && (err.message.includes("decryption") || err.message.includes("Padding") || err.message.includes("mac") || err.message.includes("bad decrypt"))) {
+        setPassDialogError("Incorrect master password. Decryption failed.");
+      } else {
+        setPassDialogError(err.message || String(err));
+      }
     } finally {
       setClaimingId(null);
     }
-  }, [rpcClient, activeNetwork, refreshHistory, evmPrivateKey]);
+  }
 
   // ── Validation ────────────────────────────────────────────────────────────
 
@@ -794,7 +842,7 @@ export function BridgePage() {
                         <div className="bridge-actions-cell">
                           {rec.status === "waiting_bridge" && (
                             <div className="flex flex-col gap-1 items-stretch" style={{ minWidth: "150px" }}>
-                              {evmPrivateKey ? (
+                              {isCredentialsSaved ? (
                                 <>
                                   <button
                                     className="btn btn-primary btn-sm"
@@ -825,7 +873,7 @@ export function BridgePage() {
                                   </button>
                                   <span className="text-[10px] text-muted text-center mt-1" style={{ maxWidth: "150px", display: "inline-block", whiteSpace: "normal" }}>
                                     💡 Browser wallet extensions are not supported natively in desktop mode.
-                                    Import your EVM Private Key in Settings, or run NexSYS in Chrome to claim.
+                                    Import your EVM Credentials in Settings, or run NexSYS in Chrome to claim.
                                   </span>
                                 </>
                               )}
@@ -867,6 +915,46 @@ export function BridgePage() {
         danger
         onConfirm={handleNativeBridge}
         onCancel={() => setConfirmOpen(false)}
+      />
+
+      <ConfirmDialog
+        open={passDialogOpen}
+        title="Sign Bridge Transaction"
+        description={
+          <div>
+            <p className="mb-4">Enter your Master Password to sign and broadcast the NEVM claim transaction.</p>
+            <input
+              type="password"
+              className="input input-mono w-full"
+              placeholder="Master Password"
+              value={passDialogPassword}
+              onChange={(e) => {
+                setPassDialogPassword(e.target.value);
+                setPassDialogError(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && passDialogPassword && !claimingId) {
+                  handlePasswordSubmit();
+                }
+              }}
+              autoFocus
+            />
+            {passDialogError && (
+              <div className="text-danger text-xs mt-2 font-semibold">
+                ⚠️ {passDialogError}
+              </div>
+            )}
+          </div>
+        }
+        confirmLabel={claimingId ? "Claiming..." : "Confirm & Sign"}
+        cancelLabel="Cancel"
+        onConfirm={handlePasswordSubmit}
+        onCancel={() => {
+          setPassDialogOpen(false);
+          setPassDialogPassword("");
+          setPassDialogError(null);
+          setPendingClaimRecord(null);
+        }}
       />
     </div>
   );

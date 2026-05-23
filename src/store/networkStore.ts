@@ -14,6 +14,7 @@ import {
   saveRpcConfig,
 } from "../services/networkEnvironmentService";
 import { SyscoinRpcClient } from "../services/syscoinRpcClient";
+import { encryptData, decryptData } from "../services/cryptoService";
 
 // ── EVM address persistence ───────────────────────────────────────────────────
 
@@ -28,15 +29,15 @@ function saveEvmAddress(network: NetworkEnvironment, address: string) {
   else localStorage.removeItem(evmAddressKey(network));
 }
 
-function evmPrivateKeyKey(network: NetworkEnvironment) {
-  return `nexsys_evm_private_key_${network}`;
+function evmEncryptedKey(network: NetworkEnvironment) {
+  return `nexsys_evm_encrypted_${network}`;
 }
-function loadEvmPrivateKey(network: NetworkEnvironment): string {
-  return localStorage.getItem(evmPrivateKeyKey(network)) ?? "";
+function loadEvmEncrypted(network: NetworkEnvironment): string {
+  return localStorage.getItem(evmEncryptedKey(network)) ?? "";
 }
-function saveEvmPrivateKey(network: NetworkEnvironment, key: string) {
-  if (key) localStorage.setItem(evmPrivateKeyKey(network), key);
-  else localStorage.removeItem(evmPrivateKeyKey(network));
+function saveEvmEncrypted(network: NetworkEnvironment, encryptedJson: string) {
+  if (encryptedJson) localStorage.setItem(evmEncryptedKey(network), encryptedJson);
+  else localStorage.removeItem(evmEncryptedKey(network));
 }
 
 // ── Store ─────────────────────────────────────────────────────────────────────
@@ -47,34 +48,42 @@ interface NetworkState {
   rpcClient: SyscoinRpcClient;
   /** The user's Syscoin NEVM / Rollux (0x) address, saved per network. */
   evmAddress: string;
-  /** The user's EVM private key, saved per network. */
-  evmPrivateKey: string;
+  /** Whether the user has saved encrypted EVM credentials. */
+  isCredentialsSaved: boolean;
+  /** The encrypted EVM credentials JSON string. */
+  evmEncryptedJson: string;
 
   setNetwork: (network: NetworkEnvironment) => void;
   updateRpcConfig: (partial: Partial<RpcConfig>) => void;
   setEvmAddress: (address: string) => void;
-  setEvmPrivateKey: (key: string) => void;
+  saveCredentials: (type: "private_key" | "mnemonic", value: string, password: string) => Promise<void>;
+  clearCredentials: () => void;
+  decryptPrivateKey: (password: string) => Promise<string>;
 }
 
 const initialNetwork   = loadSavedNetwork();
 const initialRpcConfig = loadRpcConfig(initialNetwork);
+const initialEncrypted = loadEvmEncrypted(initialNetwork);
 
 export const useNetworkStore = create<NetworkState>((set, get) => ({
   activeNetwork: initialNetwork,
   rpcConfig:     initialRpcConfig,
   rpcClient:     new SyscoinRpcClient(initialRpcConfig),
   evmAddress:    loadEvmAddress(initialNetwork),
-  evmPrivateKey: loadEvmPrivateKey(initialNetwork),
+  isCredentialsSaved: !!initialEncrypted,
+  evmEncryptedJson:   initialEncrypted,
 
   setNetwork(network) {
     const rpcConfig = loadRpcConfig(network);
+    const encrypted = loadEvmEncrypted(network);
     saveActiveNetwork(network);
     set({
       activeNetwork: network,
       rpcConfig,
       rpcClient:  new SyscoinRpcClient(rpcConfig),
       evmAddress: loadEvmAddress(network),
-      evmPrivateKey: loadEvmPrivateKey(network),
+      isCredentialsSaved: !!encrypted,
+      evmEncryptedJson:   encrypted,
     });
   },
 
@@ -91,24 +100,61 @@ export const useNetworkStore = create<NetworkState>((set, get) => ({
     set({ evmAddress: address.trim() });
   },
 
-  setEvmPrivateKey(key) {
+  async saveCredentials(type, value, password) {
     const network = get().activeNetwork;
-    const trimmed = key.trim();
-    saveEvmPrivateKey(network, trimmed);
+    const cleanValue = value.trim();
+    if (!cleanValue) return;
 
-    if (trimmed) {
-      try {
-        const keyWithPrefix = trimmed.startsWith("0x") ? trimmed : `0x${trimmed}`;
-        const wallet = new Wallet(keyWithPrefix);
-        const derivedAddress = wallet.address;
-        saveEvmAddress(network, derivedAddress);
-        set({ evmPrivateKey: trimmed, evmAddress: derivedAddress });
-      } catch (err) {
-        // Just save the private key, don't update address if invalid
-        set({ evmPrivateKey: trimmed });
-      }
+    // Encrypt the credentials payload
+    const payload = JSON.stringify({ type, value: cleanValue });
+    const encryptedJson = await encryptData(payload, password);
+
+    // Save encrypted credentials
+    saveEvmEncrypted(network, encryptedJson);
+
+    // Derive public EVM address
+    let derivedAddress = "";
+    if (type === "private_key") {
+      const keyWithPrefix = cleanValue.startsWith("0x") ? cleanValue : `0x${cleanValue}`;
+      derivedAddress = new Wallet(keyWithPrefix).address;
     } else {
-      set({ evmPrivateKey: "" });
+      derivedAddress = Wallet.fromPhrase(cleanValue).address;
+    }
+
+    saveEvmAddress(network, derivedAddress);
+
+    set({
+      isCredentialsSaved: true,
+      evmEncryptedJson: encryptedJson,
+      evmAddress: derivedAddress,
+    });
+  },
+
+  clearCredentials() {
+    const network = get().activeNetwork;
+    saveEvmEncrypted(network, "");
+    saveEvmAddress(network, "");
+    set({
+      isCredentialsSaved: false,
+      evmEncryptedJson: "",
+      evmAddress: "",
+    });
+  },
+
+  async decryptPrivateKey(password) {
+    const json = get().evmEncryptedJson;
+    if (!json) throw new Error("No credentials saved.");
+
+    // Decrypt the payload
+    const decryptedPayload = await decryptData(json, password);
+    const { type, value } = JSON.parse(decryptedPayload);
+
+    if (type === "private_key") {
+      return value.startsWith("0x") ? value : `0x${value}`;
+    } else {
+      // Derive private key from seed phrase
+      const wallet = Wallet.fromPhrase(value);
+      return wallet.privateKey;
     }
   },
 }));

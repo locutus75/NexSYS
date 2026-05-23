@@ -8,18 +8,25 @@ import { Link } from "react-router-dom";
 import { WarningBox } from "../../components/shared/WarningBox";
 import { useNetworkStore } from "../../store/networkStore";
 import type { RpcConfig } from "../../types/network";
+import { validatePassword } from "../../services/cryptoService";
 
 export function SettingsPage() {
-  const { rpcConfig, updateRpcConfig, activeNetwork, evmAddress, setEvmAddress, evmPrivateKey, setEvmPrivateKey } = useNetworkStore();
+  const { rpcConfig, updateRpcConfig, activeNetwork, evmAddress, setEvmAddress, isCredentialsSaved, saveCredentials, clearCredentials } = useNetworkStore();
   const [form, setForm] = useState<RpcConfig>({ ...rpcConfig });
   const [saved, setSaved] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<"ok" | "fail" | null>(null);
   const [testError, setTestError] = useState<string | null>(null);
   const [inTauri, setInTauri] = useState<boolean | null>(null);
+  
+  // EVM Credentials Tab & Form State
+  const [credMethod, setCredMethod] = useState<"mnemonic" | "private_key" | "watch_only">("watch_only");
   const [evmForm, setEvmForm] = useState(evmAddress);
-  const [evmPrivKeyForm, setEvmPrivKeyForm] = useState(evmPrivateKey);
+  const [evmPrivKeyForm, setEvmPrivKeyForm] = useState("");
+  const [evmMnemonicForm, setEvmMnemonicForm] = useState("");
+  const [evmPasswordForm, setEvmPasswordForm] = useState("");
   const [showPrivKey, setShowPrivKey] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const [evmSaved, setEvmSaved] = useState(false);
   const [evmError, setEvmError] = useState<string | null>(null);
 
@@ -54,8 +61,7 @@ export function SettingsPage() {
 
   useEffect(() => {
     setEvmForm(evmAddress);
-    setEvmPrivKeyForm(evmPrivateKey);
-  }, [evmAddress, evmPrivateKey]);
+  }, [evmAddress]);
 
   async function handleCheckForUpdates() {
     setUpdateStatus("checking");
@@ -235,70 +241,191 @@ export function SettingsPage() {
         </div>
       </div>
 
-      {/* EVM address card */}
+      {/* EVM address/credentials card */}
       <div className="card mt-6" style={{ maxWidth: 560 }}>
         <div className="stat-label mb-4">NEVM / Rollux Credentials ({activeNetwork})</div>
+        
         <WarningBox severity="info" className="mb-5">
-          Your Syscoin NEVM and Rollux credentials are stored locally on this device only.
-          They are never logged or transmitted to any external service.
+          Your credentials are encrypted using AES-GCM 256-bit and stored locally.
+          The master password is required to approve bridge claims and is never saved.
         </WarningBox>
 
-        <div className="form-group mb-4">
-          <label className="form-label" htmlFor="evm-address">Your 0x Address (Watch-Only or Derived)</label>
-          <input
-            id="evm-address"
-            className="input input-mono mt-2"
-            placeholder="0x…"
-            value={evmForm}
-            autoComplete="off"
-            spellCheck={false}
-            onChange={e => {
-              setEvmForm(e.target.value);
-              setEvmSaved(false);
-              setEvmError(null);
-            }}
-          />
-          {evmForm && !evmForm.startsWith("0x") && (
-            <span className="form-hint text-warning">Address must start with 0x</span>
-          )}
-          {evmForm && evmForm.startsWith("0x") && evmForm.length !== 42 && (
-            <span className="form-hint text-warning">Expected 42 characters, got {evmForm.length}</span>
-          )}
-          {evmForm && evmForm.startsWith("0x") && evmForm.length === 42 && (
-            <span className="form-hint text-success">Valid EVM address ✓</span>
-          )}
+        {isCredentialsSaved && (
+          <WarningBox severity="success" className="mb-5" title="Credentials Secured">
+            ✓ Natively encrypted wallet configured (Address: <code>{evmAddress}</code>). 
+            You can sign SPV Bridge claims directly in-app.
+          </WarningBox>
+        )}
+
+        {/* Tab Selection */}
+        <div className="flex gap-2 mb-5" style={{ borderBottom: "1px solid var(--color-border)", paddingBottom: "12px" }}>
+          <button
+            type="button"
+            className={`btn btn-sm ${credMethod === "mnemonic" ? "btn-primary" : "btn-ghost"}`}
+            onClick={() => { setCredMethod("mnemonic"); setEvmError(null); setEvmSaved(false); }}
+          >
+            🔑 Seed Phrase
+          </button>
+          <button
+            type="button"
+            className={`btn btn-sm ${credMethod === "private_key" ? "btn-primary" : "btn-ghost"}`}
+            onClick={() => { setCredMethod("private_key"); setEvmError(null); setEvmSaved(false); }}
+          >
+            🔒 Private Key
+          </button>
+          <button
+            type="button"
+            className={`btn btn-sm ${credMethod === "watch_only" ? "btn-primary" : "btn-ghost"}`}
+            onClick={() => { setCredMethod("watch_only"); setEvmError(null); setEvmSaved(false); }}
+          >
+            👁 Watch-Only
+          </button>
         </div>
 
-        <div className="form-group mb-4">
-          <label className="form-label" htmlFor="evm-private-key">Private Key (For In-App Claims)</label>
-          <div className="flex gap-2 mt-2" style={{ position: "relative" }}>
-            <input
-              id="evm-private-key"
-              type={showPrivKey ? "text" : "password"}
-              className="input input-mono flex-1"
-              placeholder="Enter your EVM Private Key (without or with 0x)"
-              value={evmPrivKeyForm}
+        {/* Tab Content */}
+        {credMethod === "mnemonic" && (
+          <div className="form-group mb-4">
+            <label className="form-label" htmlFor="evm-mnemonic">Mnemonic Seed Phrase (12 or 24 words)</label>
+            <textarea
+              id="evm-mnemonic"
+              className="input input-mono mt-2 w-full"
+              style={{ minHeight: "80px", resize: "vertical", padding: "10px", lineHeight: "1.4" }}
+              placeholder="word1 word2 word3..."
+              value={evmMnemonicForm}
               autoComplete="off"
               spellCheck={false}
               onChange={e => {
-                setEvmPrivKeyForm(e.target.value);
+                setEvmMnemonicForm(e.target.value);
                 setEvmSaved(false);
                 setEvmError(null);
               }}
             />
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm"
-              style={{ minWidth: "60px" }}
-              onClick={() => setShowPrivKey(!showPrivKey)}
-            >
-              {showPrivKey ? "Hide" : "Show"}
-            </button>
+            {evmMnemonicForm && !((words => words.length === 12 || words.length === 24)(evmMnemonicForm.trim().split(/\s+/))) && (
+              <span className="form-hint text-warning">Must be exactly 12 or 24 words (separated by spaces).</span>
+            )}
+            {evmMnemonicForm && ((words => words.length === 12 || words.length === 24)(evmMnemonicForm.trim().split(/\s+/))) && (
+              <span className="form-hint text-success">Valid mnemonic format ✓</span>
+            )}
           </div>
-          <span className="form-hint text-xs text-muted mt-2 block">
-            Entering a private key will automatically derive your 0x address above.
-          </span>
-        </div>
+        )}
+
+        {credMethod === "private_key" && (
+          <div className="form-group mb-4">
+            <label className="form-label" htmlFor="evm-private-key">Private Key</label>
+            <div className="flex gap-2 mt-2" style={{ position: "relative" }}>
+              <input
+                id="evm-private-key"
+                type={showPrivKey ? "text" : "password"}
+                className="input input-mono flex-1"
+                placeholder="Enter 64-character hex private key"
+                value={evmPrivKeyForm}
+                autoComplete="off"
+                spellCheck={false}
+                onChange={e => {
+                  setEvmPrivKeyForm(e.target.value);
+                  setEvmSaved(false);
+                  setEvmError(null);
+                }}
+              />
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                style={{ minWidth: "60px" }}
+                onClick={() => setShowPrivKey(!showPrivKey)}
+              >
+                {showPrivKey ? "Hide" : "Show"}
+              </button>
+            </div>
+            {evmPrivKeyForm && !((key) => { const clean = key.trim().startsWith("0x") ? key.trim().slice(2) : key.trim(); return clean.length === 64 && /^[0-9a-fA-F]+$/.test(clean); })(evmPrivKeyForm) && (
+              <span className="form-hint text-warning">Must be a valid 64-character hex string.</span>
+            )}
+            {evmPrivKeyForm && ((key) => { const clean = key.trim().startsWith("0x") ? key.trim().slice(2) : key.trim(); return clean.length === 64 && /^[0-9a-fA-F]+$/.test(clean); })(evmPrivKeyForm) && (
+              <span className="form-hint text-success">Valid private key format ✓</span>
+            )}
+          </div>
+        )}
+
+        {credMethod === "watch_only" && (
+          <div className="form-group mb-4">
+            <label className="form-label" htmlFor="evm-address">Watch-Only 0x Address</label>
+            <input
+              id="evm-address"
+              className="input input-mono mt-2"
+              placeholder="0x…"
+              value={evmForm}
+              autoComplete="off"
+              spellCheck={false}
+              onChange={e => {
+                setEvmForm(e.target.value);
+                setEvmSaved(false);
+                setEvmError(null);
+              }}
+            />
+            {evmForm && !evmForm.startsWith("0x") && (
+              <span className="form-hint text-warning">Address must start with 0x</span>
+            )}
+            {evmForm && evmForm.startsWith("0x") && evmForm.length !== 42 && (
+              <span className="form-hint text-warning">Expected 42 characters, got {evmForm.length}</span>
+            )}
+            {evmForm && evmForm.startsWith("0x") && evmForm.length === 42 && (
+              <span className="form-hint text-success">Valid EVM address ✓</span>
+            )}
+          </div>
+        )}
+
+        {/* Master Password Section (Only for Mnemonic/Private Key) */}
+        {credMethod !== "watch_only" && (
+          <div className="form-group mb-5" style={{ borderTop: "1px solid var(--color-border)", paddingTop: "16px" }}>
+            <label className="form-label" htmlFor="evm-password">Master Password (For AES-GCM Encryption)</label>
+            <div className="flex gap-2 mt-2" style={{ position: "relative" }}>
+              <input
+                id="evm-password"
+                type={showPassword ? "text" : "password"}
+                className="input input-mono flex-1"
+                placeholder="Choose a strong password"
+                value={evmPasswordForm}
+                autoComplete="off"
+                onChange={e => {
+                  setEvmPasswordForm(e.target.value);
+                  setEvmSaved(false);
+                  setEvmError(null);
+                }}
+              />
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                style={{ minWidth: "60px" }}
+                onClick={() => setShowPassword(!showPassword)}
+              >
+                {showPassword ? "Hide" : "Show"}
+              </button>
+            </div>
+
+            {/* Strength checklist */}
+            {(() => {
+              const rules = validatePassword(evmPasswordForm);
+              return (
+                <div className="password-rules-checklist mt-3 p-3 text-xs" style={{ backgroundColor: "rgba(0,0,0,0.15)", borderRadius: "4px", display: "flex", flexDirection: "column", gap: "4px" }}>
+                  <div style={{ color: rules.length ? "var(--color-success)" : "#ff4a4a", display: "flex", alignItems: "center", gap: "6px" }}>
+                    <span>{rules.length ? "●" : "○"}</span> Minimaal 12 karakters ({evmPasswordForm.length})
+                  </div>
+                  <div style={{ color: rules.hasUpper ? "var(--color-success)" : "#ff4a4a", display: "flex", alignItems: "center", gap: "6px" }}>
+                    <span>{rules.hasUpper ? "●" : "○"}</span> Minimaal 1 hoofdletter (A-Z)
+                  </div>
+                  <div style={{ color: rules.hasLower ? "var(--color-success)" : "#ff4a4a", display: "flex", alignItems: "center", gap: "6px" }}>
+                    <span>{rules.hasLower ? "●" : "○"}</span> Minimaal 1 kleine letter (a-z)
+                  </div>
+                  <div style={{ color: rules.hasDigit ? "var(--color-success)" : "#ff4a4a", display: "flex", alignItems: "center", gap: "6px" }}>
+                    <span>{rules.hasDigit ? "●" : "○"}</span> Minimaal 1 cijfer (0-9)
+                  </div>
+                  <div style={{ color: rules.hasSpecial ? "var(--color-success)" : "#ff4a4a", display: "flex", alignItems: "center", gap: "6px" }}>
+                    <span>{rules.hasSpecial ? "●" : "○"}</span> Minimaal 1 vreemd/speciaal karakter
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+        )}
 
         {evmError && <WarningBox severity="danger" className="mt-2">{evmError}</WarningBox>}
         {evmSaved && <WarningBox severity="success" className="mt-2">EVM credentials saved successfully.</WarningBox>}
@@ -307,46 +434,48 @@ export function SettingsPage() {
           <button
             id="settings-evm-save-btn"
             className="btn btn-primary"
-            onClick={() => {
-              const addr = evmForm.trim();
-              const privKey = evmPrivKeyForm.trim();
-
-              if (privKey) {
-                const cleanKey = privKey.startsWith("0x") ? privKey.slice(2) : privKey;
-                if (cleanKey.length !== 64 || !/^[0-9a-fA-F]+$/.test(cleanKey)) {
-                  setEvmError("Invalid private key format. Must be a 64-character hex string.");
-                  return;
+            disabled={
+              (credMethod === "mnemonic" && (!((words => words.length === 12 || words.length === 24)(evmMnemonicForm.trim().split(/\s+/))) || !validatePassword(evmPasswordForm).isValid)) ||
+              (credMethod === "private_key" && (!((key) => { const clean = key.trim().startsWith("0x") ? key.trim().slice(2) : key.trim(); return clean.length === 64 && /^[0-9a-fA-F]+$/.test(clean); })(evmPrivKeyForm) || !validatePassword(evmPasswordForm).isValid)) ||
+              (credMethod === "watch_only" && (evmForm.length !== 42 || !evmForm.startsWith("0x")))
+            }
+            onClick={async () => {
+              try {
+                if (credMethod === "mnemonic") {
+                  await saveCredentials("mnemonic", evmMnemonicForm, evmPasswordForm);
+                } else if (credMethod === "private_key") {
+                  await saveCredentials("private_key", evmPrivKeyForm, evmPasswordForm);
+                } else {
+                  setEvmAddress(evmForm.trim());
                 }
-                setEvmPrivateKey(privKey);
-              } else {
-                if (addr && (addr.length !== 42 || !addr.startsWith("0x"))) {
-                  setEvmError("Enter a valid 42-character 0x address, or leave blank to clear.");
-                  return;
-                }
-                setEvmPrivateKey("");
-                setEvmAddress(addr);
+                setEvmSaved(true);
+                setEvmError(null);
+                setEvmPasswordForm("");
+                setEvmMnemonicForm("");
+                setEvmPrivKeyForm("");
+              } catch (err: any) {
+                setEvmError(`Error saving credentials: ${err.message || String(err)}`);
               }
-
-              setEvmSaved(true);
-              setEvmError(null);
             }}
           >
             Save Credentials
           </button>
-          {(evmAddress || evmPrivateKey) && (
+          
+          {(evmAddress || isCredentialsSaved) && (
             <button
               className="btn btn-ghost"
               onClick={() => {
+                clearCredentials();
                 setEvmForm("");
+                setEvmMnemonicForm("");
                 setEvmPrivKeyForm("");
-                setEvmAddress("");
-                setEvmPrivateKey("");
+                setEvmPasswordForm("");
                 setEvmSaved(true);
                 setEvmError(null);
               }}
               id="settings-evm-clear-btn"
             >
-              Clear All
+              Clear Credentials
             </button>
           )}
         </div>
