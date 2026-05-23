@@ -5,6 +5,7 @@
 
 import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
+import { Wallet } from "ethers";
 import { WarningBox } from "../../components/shared/WarningBox";
 import { useNetworkStore } from "../../store/networkStore";
 import type { RpcConfig } from "../../types/network";
@@ -29,6 +30,23 @@ export function SettingsPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [evmSaved, setEvmSaved] = useState(false);
   const [evmError, setEvmError] = useState<string | null>(null);
+  const [isNewlyGenerated, setIsNewlyGenerated] = useState(false);
+
+  const handleGenerateSeed = () => {
+    try {
+      const wallet = Wallet.createRandom();
+      if (wallet.mnemonic && wallet.mnemonic.phrase) {
+        setEvmMnemonicForm(wallet.mnemonic.phrase);
+        setIsNewlyGenerated(true);
+        setEvmSaved(false);
+        setEvmError(null);
+      } else {
+        throw new Error("Mnemonic phrase generation failed.");
+      }
+    } catch (err: any) {
+      setEvmError(`Failed to generate seed phrase: ${err.message || String(err)}`);
+    }
+  };
 
   const [bgLogoEnabled, setBgLogoEnabled] = useState(() => {
     return localStorage.getItem("nexsys_bg_logo_enabled") !== "false";
@@ -262,21 +280,21 @@ export function SettingsPage() {
           <button
             type="button"
             className={`btn btn-sm ${credMethod === "mnemonic" ? "btn-primary" : "btn-ghost"}`}
-            onClick={() => { setCredMethod("mnemonic"); setEvmError(null); setEvmSaved(false); }}
+            onClick={() => { setCredMethod("mnemonic"); setEvmError(null); setEvmSaved(false); setIsNewlyGenerated(false); }}
           >
             🔑 Seed Phrase
           </button>
           <button
             type="button"
             className={`btn btn-sm ${credMethod === "private_key" ? "btn-primary" : "btn-ghost"}`}
-            onClick={() => { setCredMethod("private_key"); setEvmError(null); setEvmSaved(false); }}
+            onClick={() => { setCredMethod("private_key"); setEvmError(null); setEvmSaved(false); setIsNewlyGenerated(false); }}
           >
             🔒 Private Key
           </button>
           <button
             type="button"
             className={`btn btn-sm ${credMethod === "watch_only" ? "btn-primary" : "btn-ghost"}`}
-            onClick={() => { setCredMethod("watch_only"); setEvmError(null); setEvmSaved(false); }}
+            onClick={() => { setCredMethod("watch_only"); setEvmError(null); setEvmSaved(false); setIsNewlyGenerated(false); }}
           >
             👁 Watch-Only
           </button>
@@ -285,10 +303,20 @@ export function SettingsPage() {
         {/* Tab Content */}
         {credMethod === "mnemonic" && (
           <div className="form-group mb-4">
-            <label className="form-label" htmlFor="evm-mnemonic">Mnemonic Seed Phrase (12 or 24 words)</label>
+            <div className="flex justify-between items-center mb-2">
+              <label className="form-label" htmlFor="evm-mnemonic">Mnemonic Seed Phrase (12 or 24 words)</label>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                style={{ padding: "2px 8px", fontSize: "0.75rem", border: "1px solid var(--color-border)" }}
+                onClick={handleGenerateSeed}
+              >
+                ✨ Generate New Seed
+              </button>
+            </div>
             <textarea
               id="evm-mnemonic"
-              className="input input-mono mt-2 w-full"
+              className="input input-mono mt-1 w-full"
               style={{ minHeight: "80px", resize: "vertical", padding: "10px", lineHeight: "1.4" }}
               placeholder="word1 word2 word3..."
               value={evmMnemonicForm}
@@ -298,6 +326,7 @@ export function SettingsPage() {
                 setEvmMnemonicForm(e.target.value);
                 setEvmSaved(false);
                 setEvmError(null);
+                setIsNewlyGenerated(false);
               }}
             />
             {evmMnemonicForm && !((words => words.length === 12 || words.length === 24)(evmMnemonicForm.trim().split(/\s+/))) && (
@@ -305,6 +334,15 @@ export function SettingsPage() {
             )}
             {evmMnemonicForm && ((words => words.length === 12 || words.length === 24)(evmMnemonicForm.trim().split(/\s+/))) && (
               <span className="form-hint text-success">Valid mnemonic format ✓</span>
+            )}
+            {isNewlyGenerated && (
+              <WarningBox severity="warn" title="Backup Your Seed Phrase!" className="mt-3">
+                <span className="text-xs">
+                  This 12-word phrase was generated cryptographically on your device. 
+                  Write it down and store it in a safe, offline location. 
+                  <strong> If you lose it, your funds are gone forever.</strong>
+                </span>
+              </WarningBox>
             )}
           </div>
         )}
@@ -453,6 +491,7 @@ export function SettingsPage() {
                 setEvmPasswordForm("");
                 setEvmMnemonicForm("");
                 setEvmPrivKeyForm("");
+                setIsNewlyGenerated(false);
               } catch (err: any) {
                 setEvmError(`Error saving credentials: ${err.message || String(err)}`);
               }
@@ -470,6 +509,7 @@ export function SettingsPage() {
                 setEvmMnemonicForm("");
                 setEvmPrivKeyForm("");
                 setEvmPasswordForm("");
+                setIsNewlyGenerated(false);
                 setEvmSaved(true);
                 setEvmError(null);
               }}
