@@ -10,7 +10,7 @@ import { useNetworkStore } from "../../store/networkStore";
 import type { RpcConfig } from "../../types/network";
 
 export function SettingsPage() {
-  const { rpcConfig, updateRpcConfig, activeNetwork, evmAddress, setEvmAddress } = useNetworkStore();
+  const { rpcConfig, updateRpcConfig, activeNetwork, evmAddress, setEvmAddress, evmPrivateKey, setEvmPrivateKey } = useNetworkStore();
   const [form, setForm] = useState<RpcConfig>({ ...rpcConfig });
   const [saved, setSaved] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -18,6 +18,8 @@ export function SettingsPage() {
   const [testError, setTestError] = useState<string | null>(null);
   const [inTauri, setInTauri] = useState<boolean | null>(null);
   const [evmForm, setEvmForm] = useState(evmAddress);
+  const [evmPrivKeyForm, setEvmPrivKeyForm] = useState(evmPrivateKey);
+  const [showPrivKey, setShowPrivKey] = useState(false);
   const [evmSaved, setEvmSaved] = useState(false);
   const [evmError, setEvmError] = useState<string | null>(null);
 
@@ -49,6 +51,11 @@ export function SettingsPage() {
       }).catch((err) => console.error("Error loading app version:", err));
     }
   }, [inTauri]);
+
+  useEffect(() => {
+    setEvmForm(evmAddress);
+    setEvmPrivKeyForm(evmPrivateKey);
+  }, [evmAddress, evmPrivateKey]);
 
   async function handleCheckForUpdates() {
     setUpdateStatus("checking");
@@ -230,14 +237,14 @@ export function SettingsPage() {
 
       {/* EVM address card */}
       <div className="card mt-6" style={{ maxWidth: 560 }}>
-        <div className="stat-label mb-4">NEVM / Rollux Address ({activeNetwork})</div>
+        <div className="stat-label mb-4">NEVM / Rollux Credentials ({activeNetwork})</div>
         <WarningBox severity="info" className="mb-5">
-          Your Syscoin NEVM and Rollux balances are fetched from public read-only endpoints.
-          This address is stored locally and never sent to any server.
+          Your Syscoin NEVM and Rollux credentials are stored locally on this device only.
+          They are never logged or transmitted to any external service.
         </WarningBox>
 
-        <div className="form-group">
-          <label className="form-label" htmlFor="evm-address">Your 0x Address</label>
+        <div className="form-group mb-4">
+          <label className="form-label" htmlFor="evm-address">Your 0x Address (Watch-Only or Derived)</label>
           <input
             id="evm-address"
             className="input input-mono mt-2"
@@ -262,8 +269,39 @@ export function SettingsPage() {
           )}
         </div>
 
+        <div className="form-group mb-4">
+          <label className="form-label" htmlFor="evm-private-key">Private Key (For In-App Claims)</label>
+          <div className="flex gap-2 mt-2" style={{ position: "relative" }}>
+            <input
+              id="evm-private-key"
+              type={showPrivKey ? "text" : "password"}
+              className="input input-mono flex-1"
+              placeholder="Enter your EVM Private Key (without or with 0x)"
+              value={evmPrivKeyForm}
+              autoComplete="off"
+              spellCheck={false}
+              onChange={e => {
+                setEvmPrivKeyForm(e.target.value);
+                setEvmSaved(false);
+                setEvmError(null);
+              }}
+            />
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              style={{ minWidth: "60px" }}
+              onClick={() => setShowPrivKey(!showPrivKey)}
+            >
+              {showPrivKey ? "Hide" : "Show"}
+            </button>
+          </div>
+          <span className="form-hint text-xs text-muted mt-2 block">
+            Entering a private key will automatically derive your 0x address above.
+          </span>
+        </div>
+
         {evmError && <WarningBox severity="danger" className="mt-2">{evmError}</WarningBox>}
-        {evmSaved && <WarningBox severity="success" className="mt-2">EVM address saved.</WarningBox>}
+        {evmSaved && <WarningBox severity="success" className="mt-2">EVM credentials saved successfully.</WarningBox>}
 
         <div className="flex gap-3 mt-4">
           <button
@@ -271,24 +309,44 @@ export function SettingsPage() {
             className="btn btn-primary"
             onClick={() => {
               const addr = evmForm.trim();
-              if (addr && (addr.length !== 42 || !addr.startsWith("0x"))) {
-                setEvmError("Enter a valid 42-character 0x address, or leave blank to clear.");
-                return;
+              const privKey = evmPrivKeyForm.trim();
+
+              if (privKey) {
+                const cleanKey = privKey.startsWith("0x") ? privKey.slice(2) : privKey;
+                if (cleanKey.length !== 64 || !/^[0-9a-fA-F]+$/.test(cleanKey)) {
+                  setEvmError("Invalid private key format. Must be a 64-character hex string.");
+                  return;
+                }
+                setEvmPrivateKey(privKey);
+              } else {
+                if (addr && (addr.length !== 42 || !addr.startsWith("0x"))) {
+                  setEvmError("Enter a valid 42-character 0x address, or leave blank to clear.");
+                  return;
+                }
+                setEvmPrivateKey("");
+                setEvmAddress(addr);
               }
-              setEvmAddress(addr);
+
               setEvmSaved(true);
               setEvmError(null);
             }}
           >
-            Save Address
+            Save Credentials
           </button>
-          {evmAddress && (
+          {(evmAddress || evmPrivateKey) && (
             <button
               className="btn btn-ghost"
-              onClick={() => { setEvmForm(""); setEvmAddress(""); setEvmSaved(true); }}
+              onClick={() => {
+                setEvmForm("");
+                setEvmPrivKeyForm("");
+                setEvmAddress("");
+                setEvmPrivateKey("");
+                setEvmSaved(true);
+                setEvmError(null);
+              }}
               id="settings-evm-clear-btn"
             >
-              Clear
+              Clear All
             </button>
           )}
         </div>

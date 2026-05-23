@@ -156,7 +156,7 @@ const CHAIN_LABELS: Record<ChainEnvironment, string> = {
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export function BridgePage() {
-  const { rpcClient, activeNetwork, evmAddress } = useNetworkStore();
+  const { rpcClient, activeNetwork, evmAddress, evmPrivateKey } = useNetworkStore();
 
   const [selectedRoute, setSelectedRoute] = useState<RouteId>("utxo_nevm");
   const [amount, setAmount] = useState("");
@@ -313,13 +313,14 @@ export function BridgePage() {
   }
 
   // ── Claim Execution ───────────────────────────────────────────────────────
-  const handleClaim = useCallback(async (rec: BridgeRecord) => {
+  const handleClaim = useCallback(async (rec: BridgeRecord, useInAppWallet: boolean) => {
     if (!rec.txid) return;
     setClaimingId(rec.id);
     setClaimError(null);
     try {
       const proof = await fetchSpvProof(rpcClient, activeNetwork as "MAINNET" | "TESTNET", rec.txid);
-      const evmTxHash = await submitSpvProofToNevm(proof);
+      const keyToUse = useInAppWallet ? evmPrivateKey : undefined;
+      const evmTxHash = await submitSpvProofToNevm(proof, activeNetwork, keyToUse);
       updateBridgeRecord(activeNetwork, rec.id, { 
         status: "completed",
         statusMessage: `Claimed on NEVM (TX: ${evmTxHash.slice(0, 10)}...)`
@@ -331,7 +332,7 @@ export function BridgePage() {
     } finally {
       setClaimingId(null);
     }
-  }, [rpcClient, activeNetwork, refreshHistory]);
+  }, [rpcClient, activeNetwork, refreshHistory, evmPrivateKey]);
 
   // ── Validation ────────────────────────────────────────────────────────────
 
@@ -792,14 +793,43 @@ export function BridgePage() {
                       <td>
                         <div className="bridge-actions-cell">
                           {rec.status === "waiting_bridge" && (
-                            <button
-                              className="btn btn-primary btn-sm"
-                              style={{ fontSize: "0.7rem", padding: "4px 8px" }}
-                              onClick={() => handleClaim(rec)}
-                              disabled={claimingId === rec.id}
-                            >
-                              {claimingId === rec.id ? "Claiming..." : "Claim via MetaMask"}
-                            </button>
+                            <div className="flex flex-col gap-1 items-stretch" style={{ minWidth: "150px" }}>
+                              {evmPrivateKey ? (
+                                <>
+                                  <button
+                                    className="btn btn-primary btn-sm"
+                                    style={{ fontSize: "0.7rem", padding: "4px 8px", width: "100%" }}
+                                    onClick={() => handleClaim(rec, true)}
+                                    disabled={claimingId === rec.id}
+                                  >
+                                    {claimingId === rec.id ? "Claiming..." : "Claim via In-App Wallet"}
+                                  </button>
+                                  <button
+                                    className="btn btn-secondary btn-sm"
+                                    style={{ fontSize: "0.7rem", padding: "4px 8px", width: "100%" }}
+                                    onClick={() => handleClaim(rec, false)}
+                                    disabled={claimingId === rec.id}
+                                  >
+                                    Claim via MetaMask
+                                  </button>
+                                </>
+                              ) : (
+                                <>
+                                  <button
+                                    className="btn btn-primary btn-sm"
+                                    style={{ fontSize: "0.7rem", padding: "4px 8px", width: "100%" }}
+                                    onClick={() => handleClaim(rec, false)}
+                                    disabled={claimingId === rec.id}
+                                  >
+                                    {claimingId === rec.id ? "Claiming..." : "Claim via MetaMask"}
+                                  </button>
+                                  <span className="text-[10px] text-muted text-center mt-1" style={{ maxWidth: "150px", display: "inline-block", whiteSpace: "normal" }}>
+                                    💡 Browser wallet extensions are not supported natively in desktop mode.
+                                    Import your EVM Private Key in Settings, or run NexSYS in Chrome to claim.
+                                  </span>
+                                </>
+                              )}
+                            </div>
                           )}
                           <button
                             className="btn btn-ghost btn-sm"

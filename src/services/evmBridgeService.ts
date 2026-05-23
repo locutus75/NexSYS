@@ -2,7 +2,8 @@
  * services/evmBridgeService.ts
  * Interacts with MetaMask and the Syscoin NEVM contracts for the Bridge Claim phase.
  */
-import { BrowserProvider, Contract, sha256, getBytes } from "ethers";
+import { BrowserProvider, Contract, sha256, getBytes, JsonRpcProvider, Wallet } from "ethers";
+import { EVM_RPC } from "./evmRpcClient";
 
 // ABI placeholder for the Syscoin Vault Manager to get the trusted relayer
 const SYSCOIN_VAULT_MANAGER_ABI = [
@@ -122,9 +123,28 @@ export async function ensureNevmNetwork(): Promise<BrowserProvider> {
 /**
  * Submits the SPV proof to the NEVM smart contract to mint the SYS.
  */
-export async function submitSpvProofToNevm(proofData: any): Promise<string> {
-  const provider = await ensureNevmNetwork();
-  const signer = await provider.getSigner();
+export async function submitSpvProofToNevm(
+  proofData: any,
+  network: string,
+  privateKey?: string
+): Promise<string> {
+  let signer;
+  let provider;
+
+  if (privateKey) {
+    const rpcEndpoints = EVM_RPC[network] || EVM_RPC.MAINNET;
+    const rpcUrl = rpcEndpoints.nevm;
+    if (!rpcUrl) {
+      throw new Error(`No NEVM RPC URL configured for network: ${network}`);
+    }
+    provider = new JsonRpcProvider(rpcUrl);
+    const keyWithPrefix = privateKey.startsWith("0x") ? privateKey : `0x${privateKey}`;
+    signer = new Wallet(keyWithPrefix, provider);
+  } else {
+    const browserProvider = await ensureNevmNetwork();
+    provider = browserProvider;
+    signer = await browserProvider.getSigner();
+  }
 
   // Parse proof first to have blockNumber in outer catch scope
   const proof = typeof proofData === "string" ? JSON.parse(proofData) : proofData;
