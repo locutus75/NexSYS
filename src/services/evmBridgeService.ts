@@ -253,7 +253,7 @@ export async function submitSpvProofToNevm(
         try {
           const current = await provider.getBlockNumber();
           const elapsed = current - startBlock;
-          onBlockUpdate(`Block #${current.toLocaleString()} (${elapsed} blok${elapsed !== 1 ? 'ken' : ''} verstreken)...`);
+          onBlockUpdate(`Block #${current.toLocaleString()} (${elapsed} block${elapsed !== 1 ? 's' : ''} elapsed)...`);
         } catch { /* ignore polling errors */ }
       }, 3000);
     }
@@ -354,7 +354,7 @@ export async function depositEthToRollux(
         try {
           const current = await provider.getBlockNumber();
           const elapsed = current - startBlock;
-          onBlockUpdate(`Block #${current.toLocaleString()} (${elapsed} blok${elapsed !== 1 ? 'ken' : ''} verstreken)...`);
+          onBlockUpdate(`Block #${current.toLocaleString()} (${elapsed} block${elapsed !== 1 ? 's' : ''} elapsed)...`);
         } catch { /* ignore polling errors */ }
       }, 3000);
     }

@@ -45,7 +45,15 @@ export function ConfirmDialog({
 
   // Trap focus inside dialog when open
   useEffect(() => {
-    if (open) dialogRef.current?.focus();
+    if (open) {
+      // Delay slightly so children with autoFocus can mount and grab focus first.
+      // If focus is not already inside the dialog, focus the dialog container.
+      setTimeout(() => {
+        if (dialogRef.current && !dialogRef.current.contains(document.activeElement)) {
+          dialogRef.current.focus();
+        }
+      }, 10);
+    }
   }, [open]);
 
   if (!open) return null;

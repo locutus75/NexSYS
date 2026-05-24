@@ -51,9 +51,10 @@ export function Sidebar() {
         <img src="/logo_banner.png" alt="NexSYS Command Center" className="sidebar__brand-banner-img" />
       </div>
 
-      {/* Network badge */}
-      <div className="sidebar__network">
+      {/* Network badge & Version */}
+      <div className="sidebar__network" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <NetworkBadge />
+        <span className="text-muted text-xs" style={{ opacity: 0.6 }}>{appVersion}</span>
       </div>
 
       {/* Nav links */}
@@ -79,10 +80,6 @@ export function Sidebar() {
         ))}
       </div>
 
-      {/* Footer */}
-      <div className="sidebar__footer">
-        <span className="text-muted text-xs">{appVersion}</span>
-      </div>
     </nav>
   );
 }

@@ -58,9 +58,9 @@ const ROUTES: BridgeRoute[] = [
     sourceLabel: "Syscoin Native (UTXO)",
     destLabel: "Syscoin NEVM",
     native: true,
-    estimatedTime: "~2 minuten (on-chain bevestiging)",
+    estimatedTime: "~2 minutes (on-chain confirmation)",
     feeNote: "Standaard Syscoin netwerkkosten (~0.0001 SYS)",
-    warning: "Dit is een eenrichtingstransactie. SYS wordt vernietigd op de UTXO-laag en aangemaakt op NEVM. Controleer het NEVM-adres — dit is onomkeerbaar.",
+    warning: "This is a one-way transaction. SYS is burned on the UTXO layer and minted on NEVM. Check the NEVM address carefully — this is irreversible.",
   },
   {
     id: "utxo_rollux",
@@ -71,7 +71,7 @@ const ROUTES: BridgeRoute[] = [
     native: true,
     estimatedTime: "~15–30 minuten (UTXO burn + NEVM claim + Rollux deposit)",
     feeNote: "Syscoin UTXO-kosten + NEVM-gaskosten",
-    warning: "Tweestaps proces: (1) SYS wordt gebrand op UTXO en geclaimd op NEVM via SPV-bewijs. (2) Geclaimde SYS wordt automatisch gestort op Rollux L2. Controleer het Rollux-adres zorgvuldig.",
+    warning: "Two-step process: (1) SYS is burned on UTXO and claimed on NEVM via SPV proof. (2) Claimed SYS is automatically deposited to Rollux L2. Check the Rollux address carefully.",
   },
   {
     id: "nevm_utxo",
@@ -203,6 +203,9 @@ export function BridgePage() {
   const [unlockTimeout, setUnlockTimeout] = useState("300");
   const [unlockError, setUnlockError] = useState<string | null>(null);
   const [unlocking, setUnlocking] = useState(false);
+  // Stores a bridge action to resume automatically after the wallet is unlocked
+  const [pendingBridgeAfterUnlock, setPendingBridgeAfterUnlock] = useState<(() => Promise<void>) | null>(null);
+  const [pendingBridgeLabel, setPendingBridgeLabel] = useState<string | null>(null);
 
   const route = ROUTES.find(r => r.id === selectedRoute)!;
   const allChecked = SAFETY_CHECKS.every(c => checks[c.id]);
@@ -251,6 +254,13 @@ export function BridgePage() {
         setUnlockDialogOpen(false);
         setPassphrase("");
         fetchWalletStatus();
+        // If there's a pending bridge action (e.g. was blocked by locked wallet), run it now
+        if (pendingBridgeAfterUnlock) {
+          const action = pendingBridgeAfterUnlock;
+          setPendingBridgeAfterUnlock(null);
+          setPendingBridgeLabel(null);
+          await action();
+        }
       } else {
         setUnlockError(res.error.message);
       }
@@ -284,20 +294,23 @@ export function BridgePage() {
             try {
               // Automatically execute the second step (burn SYSX to NEVM)
               const amountNum = parseFloat(rec.amount);
-              const burnTxid = await executeUtxoToNevmBridge(
-                rpcClient,
-                activeNetwork,
-                "", // empty source address
-                amountNum,
-                rec.destAddress
-              );
-              
-              updateBridgeRecord(activeNetwork, rec.id, {
-                txid: burnTxid,
-                isConversion: false,
-                status: "confirming_source",
-                statusMessage: "Confirming burn..."
-              });
+              const burnAction = async () => {
+                const burnTxid = await executeUtxoToNevmBridge(
+                  rpcClient,
+                  activeNetwork,
+                  "",
+                  amountNum,
+                  rec.destAddress
+                );
+                updateBridgeRecord(activeNetwork, rec.id, {
+                  txid: burnTxid,
+                  isConversion: false,
+                  status: "confirming_source",
+                  statusMessage: "Burn bevestigen..."
+                });
+                refreshHistory();
+              };
+              await burnAction();
             } catch (err: any) {
               console.error("Auto-burn after conversion failed:", err);
               updateBridgeRecord(activeNetwork, rec.id, {
@@ -340,6 +353,35 @@ export function BridgePage() {
 
   async function handleNativeBridge() {
     setConfirmOpen(false);
+
+    // ── Pre-check: Wallet lock status ─────────────────────────────────────────
+    // Proactively refresh wallet info. If the wallet is encrypted + locked,
+    // show the unlock dialog first and resume the bridge after unlock.
+    try {
+      const wRes = await rpcClient.getWalletInfoFull();
+      if (wRes.ok) {
+        setWalletInfo(wRes.value);
+        const isLocked =
+          wRes.value.unlocked_until !== undefined && wRes.value.unlocked_until <= 0;
+        if (isLocked) {
+          // Store the bridge execution as a pending action
+          const capturedAmount = amountNum;
+          const capturedDest = destAddress;
+          setPendingBridgeAfterUnlock(() => async () => {
+            await executeBridgeTransaction(capturedAmount, capturedDest);
+          });
+          setPendingBridgeLabel(`Bridge ${amount} SYS → ${route.destLabel}`);
+          setUnlockDialogOpen(true);
+          return;
+        }
+      }
+    } catch { /* if check fails, proceed anyway and let the bridge handle the error */ }
+
+    await executeBridgeTransaction(amountNum, destAddress);
+  }
+
+  /** Inner helper: performs the actual bridge transaction (separated so it can be deferred after unlock). */
+  async function executeBridgeTransaction(capturedAmount: number, capturedDest: string) {
     setBridging(true);
     setBridgeError(null);
 
@@ -362,30 +404,119 @@ export function BridgePage() {
         rpcClient,
         activeNetwork,
         "", // empty source address lets the wallet pick
-        amountNum,
-        destAddress
+        capturedAmount,
+        capturedDest
       );
-      
+
       const isConv = txidRaw.startsWith("conversion:");
       const txid = isConv ? txidRaw.substring("conversion:".length) : txidRaw;
 
       setLastTxid(txid);
-      updateBridgeRecord(activeNetwork, recordId, { 
-        txid, 
+      updateBridgeRecord(activeNetwork, recordId, {
+        txid,
         status: "confirming_source",
         isConversion: isConv,
-        statusMessage: isConv ? "Confirming SYS to SYSX conversion..." : "Confirming burn..."
+        statusMessage: isConv ? "Confirming SYS → SYSX conversion..." : "Confirming burn..."
       });
       refreshHistory();
       setAmount("");
       setChecks({});
     } catch (err: any) {
-      setBridgeError(err.message ?? "Bridge transaction failed.");
-      updateBridgeRecord(activeNetwork, recordId, { status: "failed", statusMessage: err.message });
+      const errMsg: string = err.message || "";
+      if (errMsg.toLowerCase().includes("walletpassphrase") || errMsg.toLowerCase().includes("passphrase")) {
+        // Wallet was locked despite pre-check (race condition) — prompt for unlock
+        const capturedAmountCopy = capturedAmount;
+        const capturedDestCopy = capturedDest;
+        setPendingBridgeAfterUnlock(() => async () => {
+          await executeBridgeTransaction(capturedAmountCopy, capturedDestCopy);
+        });
+        setPendingBridgeLabel(`Bridge ${capturedAmount.toFixed(8)} SYS → ${route.destLabel}`);
+        updateBridgeRecord(activeNetwork, recordId, {
+          status: "waiting_bridge",
+          statusMessage: "Wallet locked — unlock wallet to resume bridging."
+        });
+        setUnlockDialogOpen(true);
+      } else {
+        setBridgeError(errMsg || "Bridge transactie mislukt.");
+        updateBridgeRecord(activeNetwork, recordId, { status: "failed", statusMessage: errMsg });
+      }
       refreshHistory();
     }
     setBridging(false);
   }
+
+  const handleResumeAutoBurn = async (rec: BridgeRecord) => {
+    updateBridgeRecord(activeNetwork, rec.id, {
+      status: "confirming_source",
+      statusMessage: "Resuming..."
+    });
+    refreshHistory();
+
+    const amountNum = parseFloat(rec.amount);
+
+    try {
+      const wRes = await rpcClient.getWalletInfoFull();
+      if (wRes.ok) {
+        setWalletInfo(wRes.value);
+        const isLocked = wRes.value.unlocked_until !== undefined && wRes.value.unlocked_until <= 0;
+        if (isLocked) {
+          setPendingBridgeAfterUnlock(() => async () => {
+            const burnTxid = await executeUtxoToNevmBridge(rpcClient, activeNetwork, "", amountNum, rec.destAddress);
+            updateBridgeRecord(activeNetwork, rec.id, {
+              txid: burnTxid,
+              isConversion: false,
+              status: "confirming_source",
+              statusMessage: "Burn bevestigen..."
+            });
+            refreshHistory();
+          });
+          setPendingBridgeLabel(`Resume auto-burn for ${rec.amount} SYS`);
+          setUnlockDialogOpen(true);
+          return;
+        }
+      }
+    } catch { /* ignore pre-check failure */ }
+
+    try {
+      const burnTxid = await executeUtxoToNevmBridge(
+        rpcClient,
+        activeNetwork,
+        "",
+        amountNum,
+        rec.destAddress
+      );
+      updateBridgeRecord(activeNetwork, rec.id, {
+        txid: burnTxid,
+        isConversion: false,
+        status: "confirming_source",
+        statusMessage: "Burn bevestigen..."
+      });
+      refreshHistory();
+    } catch (err: any) {
+      const errMsg: string = err.message || "";
+      if (errMsg.toLowerCase().includes("walletpassphrase") || errMsg.toLowerCase().includes("passphrase")) {
+        setPendingBridgeAfterUnlock(() => async () => {
+          const burnTxid = await executeUtxoToNevmBridge(rpcClient, activeNetwork, "", amountNum, rec.destAddress);
+          updateBridgeRecord(activeNetwork, rec.id, {
+            txid: burnTxid,
+            isConversion: false,
+            status: "confirming_source",
+            statusMessage: "Burn bevestigen..."
+          });
+          refreshHistory();
+        });
+        setPendingBridgeLabel(`Resume auto-burn for ${rec.amount} SYS`);
+        updateBridgeRecord(activeNetwork, rec.id, {
+          status: "waiting_bridge",
+          statusMessage: "Wallet locked — unlock wallet to resume burn."
+        });
+        setUnlockDialogOpen(true);
+      } else {
+        updateBridgeRecord(activeNetwork, rec.id, { status: "failed", statusMessage: "Auto-burn mislukt: " + errMsg });
+      }
+      refreshHistory();
+    }
+  };
 
   // ── Claim Execution ───────────────────────────────────────────────────────
   const handleClaim = useCallback(async (rec: BridgeRecord, useInAppWallet: boolean) => {
@@ -855,7 +986,7 @@ export function BridgePage() {
                 disabled={!canBridge || bridging}
                 onClick={() => {
                   if (route.source === "SYSCOIN_NATIVE_UTXO" && walletInfo && walletInfo.unlocked_until === 0) {
-                    setUnlockError("Ontgrendel uw Syscoin UTXO Node Wallet om door te gaan met bridgen.");
+                    setUnlockError("Unlock your Syscoin UTXO Node Wallet to continue bridging.");
                     setUnlockDialogOpen(true);
                     return;
                   }
@@ -1119,7 +1250,7 @@ export function BridgePage() {
                       </td>
                       <td>
                         <div className="bridge-actions-cell">
-                          {rec.status === "waiting_bridge" && (
+                          {rec.status === "waiting_bridge" && !rec.isConversion && (
                             <div className="flex flex-col gap-1 items-stretch" style={{ minWidth: "150px" }}>
                               {isCredentialsSaved ? (
                                 <>
@@ -1156,6 +1287,18 @@ export function BridgePage() {
                                   </span>
                                 </>
                               )}
+                            </div>
+                          )}
+
+                          {(rec.status === "failed" || (rec.status === "waiting_bridge" && rec.isConversion)) && (
+                            <div className="flex flex-col gap-1 items-stretch" style={{ minWidth: "150px" }}>
+                              <button
+                                className="btn btn-primary btn-sm"
+                                style={{ fontSize: "0.7rem", padding: "4px 8px", width: "100%" }}
+                                onClick={() => handleResumeAutoBurn(rec)}
+                              >
+                                Resume Action
+                              </button>
                             </div>
                           )}
                           <button
@@ -1198,7 +1341,7 @@ export function BridgePage() {
 
       <ConfirmDialog
         open={passDialogOpen}
-        title={claimingId ? "Bridge wordt uitgevoerd..." : "Ontgrendel EVM Wallet (NEVM/Rollux)"}
+        title={claimingId ? "Bridge in progress..." : "Unlock EVM Wallet (NEVM/Rollux)"}
         cancelDisabled={!!claimingId}
         confirmDisabled={!!claimingId || !passDialogPassword}
         description={(() => {
@@ -1252,14 +1395,14 @@ export function BridgePage() {
                   backgroundColor: "rgba(0,0,0,0.2)",
                   border: "1px solid rgba(255,255,255,0.06)"
                 }}>
-                  <StepRow stepKey="decrypting"       label="Stap 1: EVM-referenties decrypten..." />
-                  <StepRow stepKey="fetching_proof"   label="Stap 2: SPV-bewijs ophalen van de node..." />
-                  <StepRow stepKey="broadcasting"     label="Stap 3: SPV-proof verzenden naar NEVM (relayTx)..." />
-                  <StepRow stepKey="mining"           label="Stap 4: Wachten op NEVM-bevestiging..." />
+                  <StepRow stepKey="decrypting"       label="Step 1: Decrypting EVM credentials..." />
+                  <StepRow stepKey="fetching_proof"   label="Step 2: Fetching SPV proof from node..." />
+                  <StepRow stepKey="broadcasting"     label="Step 3: Broadcasting SPV proof to NEVM (relayTx)..." />
+                  <StepRow stepKey="mining"           label="Step 4: Waiting for NEVM confirmation..." />
                   {pendingClaimRecord?.destChain === "ROLLUX" && (
                     <>
-                      <StepRow stepKey="depositing_rollux" label="Stap 5: Storten op Rollux L2 (depositETHTo)..." />
-                      <StepRow stepKey="mining_rollux"     label="Stap 6: Wachten op Rollux L2-bevestiging..." />
+                      <StepRow stepKey="depositing_rollux" label="Step 5: Depositing to Rollux L2 (depositETHTo)..." />
+                      <StepRow stepKey="mining_rollux"     label="Step 6: Waiting for Rollux L2 confirmation..." />
                     </>
                   )}
                 </div>
@@ -1271,14 +1414,14 @@ export function BridgePage() {
           return (
             <div>
               <p className="mb-4" style={{ fontSize: "0.85rem", color: "var(--color-text-secondary)" }}>
-                Voer uw <strong>EVM Master Wachtwoord</strong> in om uw opgeslagen EVM-referenties te decrypten en de claim-transactie op de NEVM/Rollux chain te ondertekenen.
+                Enter your <strong>EVM Master Password</strong> to decrypt your saved EVM credentials and sign the claim transaction on the NEVM/Rollux chain.
                 <br /><br />
-                <span className="text-accent" style={{ fontWeight: 500 }}>💡 Let op: Dit is het in-app wachtwoord dat u hebt ingesteld in de Settings, <em>niet</em> het Syscoin UTXO Node Wachtwoord.</span>
+                <span className="text-accent" style={{ fontWeight: 500 }}>💡 Note: This is the in-app password you set in Settings, <em>not</em> the Syscoin UTXO Node Passphrase.</span>
               </p>
               <input
                 type="password"
                 className="input input-mono w-full"
-                placeholder="EVM Master Wachtwoord"
+                placeholder="EVM Master Password"
                 value={passDialogPassword}
                 disabled={false}
                 onChange={(e) => {
@@ -1301,8 +1444,8 @@ export function BridgePage() {
           );
         })()}
 
-        confirmLabel={claimingId ? "Bezig met claimen..." : "Signeer & Claim"}
-        cancelLabel="Annuleren"
+        confirmLabel={claimingId ? "Claiming..." : "Sign & Claim"}
+        cancelLabel="Cancel"
         onConfirm={handlePasswordSubmit}
         onCancel={() => {
           setPassDialogOpen(false);
@@ -1324,16 +1467,22 @@ export function BridgePage() {
           >
             <div className="dialog__header">
               <span className="dialog__icon">🔑</span>
-              <h3 className="dialog__title">Ontgrendel Syscoin Core Node Wallet (UTXO)</h3>
+              <h3 className="dialog__title">Unlock Syscoin Core Node Wallet (UTXO)</h3>
             </div>
             <p className="dialog__desc" style={{ marginBottom: "var(--space-4)", fontSize: "0.85rem", color: "var(--color-text-secondary)" }}>
-              Voer uw <strong>Syscoin UTXO Node Wachtwoord</strong> in om uw lokale Syscoin Core portemonnee te ontgrendelen voor de burn-transactie.
+              Enter your <strong>Syscoin UTXO Node Passphrase</strong> to unlock your local Syscoin Core wallet for the burn transaction.
+              {pendingBridgeLabel && (
+                <div style={{ marginTop: "12px", padding: "8px 12px", backgroundColor: "rgba(var(--color-accent-rgb), 0.1)", borderLeft: "3px solid var(--color-accent)", borderRadius: "4px" }}>
+                  <span style={{ fontWeight: 600, color: "var(--color-text)" }}>Automatic action after unlock:</span><br />
+                  <span style={{ color: "var(--color-accent)" }}>{pendingBridgeLabel}</span>
+                </div>
+              )}
               <br /><br />
-              <span className="text-warning" style={{ fontWeight: 500 }}>⚠️ Let op: Dit is de passphrase van uw lokale Syscoin Core node wallet, <em>niet</em> het EVM Master Wachtwoord.</span>
+              <span className="text-warning" style={{ fontWeight: 500 }}>⚠️ Note: This is the passphrase of your local Syscoin Core node wallet, <em>not</em> the EVM Master Password.</span>
             </p>
             
             <div className="form-group" style={{ textAlign: "left", width: "100%", marginBottom: "var(--space-3)" }}>
-              <label className="form-label" htmlFor="bridge-unlock-passphrase">Syscoin UTXO Node Wachtwoord (Passphrase)</label>
+              <label className="form-label" htmlFor="bridge-unlock-passphrase">Syscoin UTXO Node Passphrase</label>
               <input
                 id="bridge-unlock-passphrase"
                 className="input"
@@ -1341,13 +1490,13 @@ export function BridgePage() {
                 required
                 value={passphrase}
                 onChange={(e) => setPassphrase(e.target.value)}
-                placeholder="Passphrase van de Syscoin Core Node"
+                placeholder="Passphrase of the Syscoin Core Node"
                 autoFocus
               />
             </div>
 
             <div className="form-group" style={{ textAlign: "left", width: "100%", marginBottom: "var(--space-4)" }}>
-              <label className="form-label" htmlFor="bridge-unlock-timeout">Geldigheidsduur (seconden)</label>
+              <label className="form-label" htmlFor="bridge-unlock-timeout">Validity (seconds)</label>
               <input
                 id="bridge-unlock-timeout"
                 className="input"
@@ -1361,7 +1510,7 @@ export function BridgePage() {
             </div>
 
             {unlockError && (
-              <WarningBox severity="danger" title="Ontgrendeling mislukt" className="mb-4">
+              <WarningBox severity="danger" title="Unlock Failed" className="mb-4">
                 {unlockError}
               </WarningBox>
             )}
@@ -1380,7 +1529,7 @@ export function BridgePage() {
                 className="btn btn-primary"
                 disabled={unlocking}
               >
-                {unlocking ? "Ontgrendelen…" : "Ontgrendel Wallet"}
+                {unlocking ? "Unlocking…" : "Unlock Wallet"}
               </button>
             </div>
           </form>
