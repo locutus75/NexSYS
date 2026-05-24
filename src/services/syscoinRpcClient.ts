@@ -271,6 +271,7 @@ export interface RawUtxo {
   spendable: boolean;
   solvable: boolean;
   safe: boolean;
+  locked?: boolean;
 }
 
 export interface RawReceivedAddress {
@@ -422,6 +423,46 @@ export class SyscoinRpcClient {
     return rpcCall<RawUtxo[]>(this.config, "listunspent", [minConf, maxConf, addresses]);
   }
 
+  lockUnspent(
+    unlock: boolean,
+    outputs: { txid: string; vout: number }[]
+  ): Promise<RpcResult<boolean>> {
+    return rpcCall<boolean>(this.config, "lockunspent", [unlock, outputs]);
+  }
+
+  listLockUnspent(): Promise<RpcResult<{ txid: string; vout: number }[]>> {
+    return rpcCall<{ txid: string; vout: number }[]>(this.config, "listlockunspent");
+  }
+
+  async getLockedUtxos(): Promise<RawUtxo[]> {
+    const res = await this.listLockUnspent();
+    if (!res.ok || res.value.length === 0) return [];
+    
+    const utxos: RawUtxo[] = [];
+    for (const locked of res.value) {
+      const outRes = await this.getTxOut(locked.txid, locked.vout);
+      if (outRes.ok && outRes.value) {
+        utxos.push({
+          txid: locked.txid,
+          vout: locked.vout,
+          amount: outRes.value.value,
+          scriptPubKey: outRes.value.scriptPubKey?.hex || "",
+          address: outRes.value.scriptPubKey?.addresses?.[0] || outRes.value.scriptPubKey?.address || "",
+          confirmations: outRes.value.confirmations,
+          spendable: false,
+          solvable: true,
+          safe: true,
+          locked: true,
+        });
+      }
+    }
+    return utxos;
+  }
+
+  getTxOut(txid: string, vout: number): Promise<RpcResult<any>> {
+    return rpcCall<any>(this.config, "gettxout", [txid, vout]);
+  }
+
   listReceivedByAddress(
     minConf = 0,
     includeEmpty = true,
@@ -550,11 +591,12 @@ export class SyscoinRpcClient {
   bridgeUtxoToNevm(
     amount: number,
     ethAddress: string,
+    sourceAddress: string = ""
   ): Promise<RpcResult<string>> {
     // Returns txid
     return rpcCall<string>(this.config, "assetallocationburn", [
-      0,           // assetguid — 0 = native SYS
-      "",          // source address (empty = wallet picks UTXOs)
+      0,             // assetguid — 0 = native SYS
+      sourceAddress, // source address (empty = wallet picks UTXOs)
       amount,
       ethAddress,
     ]);

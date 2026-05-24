@@ -34,8 +34,8 @@ export function SendPage() {
   // Address selection state
   const [selectedSourceAddress, setSelectedSourceAddress] = useState("auto");
   const [utxos, setUtxos] = useState<RawUtxo[]>([]);
-  const [sourceAddresses, setSourceAddresses] = useState<{ address: string; balance: number; label?: string }[]>([]);
-  const [walletAddresses, setWalletAddresses] = useState<{ address: string; balance: number; label?: string }[]>([]);
+  const [sourceAddresses, setSourceAddresses] = useState<{ address: string; balance: number; lockedBalance?: number; label?: string }[]>([]);
+  const [walletAddresses, setWalletAddresses] = useState<{ address: string; balance: number; lockedBalance?: number; label?: string }[]>([]);
   const [destinationSelectMode, setDestinationSelectMode] = useState("custom");
 
   // Live balance
@@ -67,6 +67,7 @@ export function SendPage() {
 
       // Group spendable coins by address to compute balances
       const balanceMap: Record<string, number> = {};
+      const lockedBalanceMap: Record<string, number> = {};
       let totalSpendable = 0;
       for (const u of utxoRes.value) {
         if (!u.address) continue;
@@ -75,24 +76,38 @@ export function SendPage() {
           balanceMap[u.address] = (balanceMap[u.address] || 0) + u.amount;
         }
       }
+      
+      try {
+        const lockedUtxos = await rpcClient.getLockedUtxos();
+        for (const u of lockedUtxos) {
+          if (!u.address) continue;
+          lockedBalanceMap[u.address] = (lockedBalanceMap[u.address] || 0) + u.amount;
+        }
+      } catch (e) {
+        console.warn("Could not load locked UTXOs in SendPage", e);
+      }
+
       setSpendable(totalSpendable);
 
       // Map received addresses list to calculate current balances
       const list = addrRes.value.map(item => ({
         address: item.address,
         balance: balanceMap[item.address] || 0,
+        lockedBalance: lockedBalanceMap[item.address] || 0,
         label: item.label,
       }));
 
       // Sort wallet addresses: positive balance first, then alphabetical
       list.sort((a, b) => {
-        if (b.balance !== a.balance) return b.balance - a.balance;
+        const aTotal = a.balance + (a.lockedBalance || 0);
+        const bTotal = b.balance + (b.lockedBalance || 0);
+        if (bTotal !== aTotal) return bTotal - aTotal;
         return a.address.localeCompare(b.address);
       });
       setWalletAddresses(list);
 
       // Source addresses are only those that have spendable coins (balance > 0)
-      const sourceList = list.filter(wa => wa.balance > 0);
+      const sourceList = list.filter(wa => wa.balance > 0 || (wa.lockedBalance || 0) > 0);
       setSourceAddresses(sourceList);
 
       setBalanceError(null);
@@ -176,6 +191,12 @@ export function SendPage() {
     return match ? match.balance : 0;
   }, [selectedSourceAddress, sourceChain, spendable, sourceAddresses]);
 
+  const isSourceLocked = useMemo(() => {
+    if (selectedSourceAddress === "auto" || sourceChain !== "SYSCOIN_NATIVE_UTXO") return false;
+    const match = sourceAddresses.find(sa => sa.address === selectedSourceAddress);
+    return match && match.balance <= 0 && (match.lockedBalance || 0) > 0;
+  }, [selectedSourceAddress, sourceChain, sourceAddresses]);
+
   function setMax() {
     if (displaySpendable === null) return;
     const fee = estFee ?? 0.0001;
@@ -219,7 +240,13 @@ export function SendPage() {
   }
 
   function handleAmountChange(value: string) {
-    setAmount(value);
+    let sanitized = value.replace(/,/g, '.');
+    sanitized = sanitized.replace(/[^0-9.]/g, '');
+    const parts = sanitized.split('.');
+    if (parts.length > 2) {
+      sanitized = parts[0] + '.' + parts.slice(1).join('');
+    }
+    setAmount(sanitized);
     if (destination.trim()) handleDestinationChange(destination);
   }
 
@@ -323,12 +350,16 @@ export function SendPage() {
       { value: "auto", label: "Automatic (Wallet Default)", isSpecial: true }
     ];
     for (const sa of sourceAddresses) {
+      let amountStr = `${sa.balance.toFixed(4)} SYS`;
+      if (sa.lockedBalance && sa.lockedBalance > 0) {
+        amountStr += ` (🔒 ${sa.lockedBalance.toFixed(4)})`;
+      }
       opts.push({
         value: sa.address,
         label: `${sa.address.slice(0, 12)}…${sa.address.slice(-8)}`,
         subtitle: sa.address,
         badge: sa.label,
-        amount: `${sa.balance.toFixed(4)} SYS`,
+        amount: amountStr,
       });
     }
     return opts;
@@ -339,12 +370,16 @@ export function SendPage() {
       { value: "custom", label: "Custom Address (type below…)", isSpecial: true }
     ];
     for (const wa of walletAddresses) {
+      let amountStr = `${wa.balance.toFixed(4)} SYS`;
+      if (wa.lockedBalance && wa.lockedBalance > 0) {
+        amountStr += ` (🔒 ${wa.lockedBalance.toFixed(4)})`;
+      }
       opts.push({
         value: wa.address,
         label: `${wa.address.slice(0, 12)}…${wa.address.slice(-8)}`,
         subtitle: wa.address,
         badge: wa.label,
-        amount: `${wa.balance.toFixed(4)} SYS`,
+        amount: amountStr,
       });
     }
     return opts;
@@ -427,9 +462,8 @@ export function SendPage() {
             <input
               id="send-amount"
               className="input input-mono"
-              type="number"
-              min="0"
-              step="0.00000001"
+              type="text"
+              inputMode="decimal"
               placeholder="0.00000000"
               value={amount}
               onChange={(e) => handleAmountChange(e.target.value)}
@@ -437,7 +471,13 @@ export function SendPage() {
           </div>
 
           {/* Validation feedback */}
-          {validation && (
+          {isSourceLocked && (
+            <WarningBox severity="danger" title="Address Locked" className="mt-4">
+              This address is currently locked in Coin Control and has no spendable balance. Please unlock it in Coin Control if you wish to spend its funds.
+            </WarningBox>
+          )}
+
+          {!isSourceLocked && validation && (
             <WarningBox
               severity={validation.action === "BLOCK" ? "danger" : validation.action === "WARN" ? "warn" : "success"}
               title={validation.action === "BLOCK" ? "Send blocked" : validation.action === "WARN" ? "Warning" : "Ready to send"}
@@ -470,7 +510,7 @@ export function SendPage() {
             id="send-review-btn"
             className="btn btn-primary w-full mt-6"
             onClick={handleReview}
-            disabled={!canReview || sending}
+            disabled={!canReview || sending || isSourceLocked}
           >
             {sending ? <><div className="spinner" /> Sending…</> : "Review & Send"}
           </button>

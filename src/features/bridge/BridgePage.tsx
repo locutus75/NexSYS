@@ -10,10 +10,12 @@
  *   NEVM ↔ Rollux — bridge.rollux.com
  */
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { Link } from "react-router-dom";
 import { WarningBox } from "../../components/shared/WarningBox";
 import { ConfirmDialog } from "../../components/shared/ConfirmDialog";
+import { CustomDropdown } from "../../components/shared/CustomDropdown";
+import type { CustomDropdownOption } from "../../components/shared/CustomDropdown";
 import { useNetworkStore } from "../../store/networkStore";
 import {
   addBridgeRecord,
@@ -174,6 +176,8 @@ export function BridgePage() {
   const [amount, setAmount] = useState("");
   const [destAddress, setDestAddress] = useState(evmAddress);
   const [spendable, setSpendable] = useState<number | null>(null);
+  const [sourceAddress, setSourceAddress] = useState<string>("");
+  const [walletAddresses, setWalletAddresses] = useState<any[]>([]);
   const [feeEst, setFeeEst] = useState<number | null>(null);
   const [checks, setChecks] = useState<Record<string, boolean>>({});
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -229,6 +233,88 @@ export function BridgePage() {
       setFeeEst(parseFloat((res.value.feerate * 0.00025).toFixed(8)));
     }
   }, [rpcClient, route.source]);
+
+  const fetchWalletAddresses = useCallback(async () => {
+    if (route.source !== "SYSCOIN_NATIVE_UTXO") return;
+    
+    // Fetch UTXOs and Received Addresses
+    const utxoRes = await rpcClient.listUnspent(0, 9999999, []);
+    const addrRes = await rpcClient.listReceivedByAddress(0, true);
+
+    if (utxoRes.ok && addrRes.ok) {
+      const balanceMap: Record<string, number> = {};
+      const lockedBalanceMap: Record<string, number> = {};
+      
+      for (const u of utxoRes.value) {
+        if (!u.address) continue;
+        if (u.spendable) {
+          balanceMap[u.address] = (balanceMap[u.address] || 0) + u.amount;
+        }
+      }
+      
+      try {
+        const lockedUtxos = await rpcClient.getLockedUtxos();
+        for (const u of lockedUtxos) {
+          if (!u.address) continue;
+          lockedBalanceMap[u.address] = (lockedBalanceMap[u.address] || 0) + u.amount;
+        }
+      } catch (e) {
+        console.warn("Could not load locked UTXOs in BridgePage", e);
+      }
+
+      // Map received addresses list to calculate current balances
+      const list = addrRes.value.map(item => ({
+        address: item.address,
+        balance: balanceMap[item.address] || 0,
+        lockedBalance: lockedBalanceMap[item.address] || 0,
+        label: item.label,
+      }));
+
+      list.sort((a, b) => {
+        const aTotal = a.balance + (a.lockedBalance || 0);
+        const bTotal = b.balance + (b.lockedBalance || 0);
+        if (bTotal !== aTotal) return bTotal - aTotal;
+        return a.address.localeCompare(b.address);
+      });
+
+      // We only care about addresses with some balance (spendable or locked)
+      const sourceList = list.filter(wa => wa.balance > 0 || (wa.lockedBalance || 0) > 0);
+      setWalletAddresses(sourceList as any); // Storing the mapped objects here
+    }
+  }, [rpcClient, route.source]);
+
+  const sourceDropdownOptions = useMemo<CustomDropdownOption[]>(() => {
+    const opts: CustomDropdownOption[] = [
+      {
+        value: "auto",
+        label: "Automatic (Wallet Default)",
+        isSpecial: true,
+      }
+    ];
+
+    // walletAddresses is now an array of { address, balance, lockedBalance, label }
+    (walletAddresses as any[]).forEach(a => {
+      let amountStr = `${a.balance.toFixed(4)} SYS`;
+      if (a.lockedBalance && a.lockedBalance > 0) {
+        amountStr += ` (🔒 ${a.lockedBalance.toFixed(4)})`;
+      }
+      opts.push({
+        value: a.address,
+        label: `${a.address.slice(0, 12)}…${a.address.slice(-8)}`,
+        subtitle: a.address,
+        amount: amountStr,
+        badge: a.label || undefined,
+      });
+    });
+
+    return opts;
+  }, [walletAddresses]);
+
+  const isSourceLocked = useMemo(() => {
+    if (!sourceAddress || route.source !== "SYSCOIN_NATIVE_UTXO") return false;
+    const match = walletAddresses.find(wa => wa.address === sourceAddress);
+    return match && match.balance <= 0 && (match.lockedBalance || 0) > 0;
+  }, [sourceAddress, route.source, walletAddresses]);
 
   // Fetch UTXO wallet status (lock/unlock state)
   const fetchWalletStatus = useCallback(async () => {
@@ -335,6 +421,7 @@ export function BridgePage() {
   useEffect(() => {
     fetchBalance();
     fetchFee();
+    fetchWalletAddresses();
     refreshHistory();
     fetchWalletStatus();
     // Reset dest address to saved EVM address when switching to UTXO→NEVM
@@ -345,9 +432,10 @@ export function BridgePage() {
     }
     setChecks({});
     setAmount("");
+    setSourceAddress("");
     setBridgeError(null);
     setLastTxid(null);
-  }, [selectedRoute, fetchBalance, fetchFee, refreshHistory, evmAddress, route.dest, fetchWalletStatus]);
+  }, [selectedRoute, fetchBalance, fetchFee, fetchWalletAddresses, refreshHistory, evmAddress, route.dest, fetchWalletStatus]);
 
   // ── Native bridge execution ───────────────────────────────────────────────
 
@@ -366,9 +454,10 @@ export function BridgePage() {
         if (isLocked) {
           // Store the bridge execution as a pending action
           const capturedAmount = amountNum;
+          const capturedSource = sourceAddress;
           const capturedDest = destAddress;
           setPendingBridgeAfterUnlock(() => async () => {
-            await executeBridgeTransaction(capturedAmount, capturedDest);
+            await executeBridgeTransaction(capturedAmount, capturedSource, capturedDest);
           });
           setPendingBridgeLabel(`Bridge ${amount} SYS → ${route.destLabel}`);
           setUnlockDialogOpen(true);
@@ -377,11 +466,11 @@ export function BridgePage() {
       }
     } catch { /* if check fails, proceed anyway and let the bridge handle the error */ }
 
-    await executeBridgeTransaction(amountNum, destAddress);
+    await executeBridgeTransaction(amountNum, sourceAddress, destAddress);
   }
 
   /** Inner helper: performs the actual bridge transaction (separated so it can be deferred after unlock). */
-  async function executeBridgeTransaction(capturedAmount: number, capturedDest: string) {
+  async function executeBridgeTransaction(capturedAmount: number, capturedSource: string, capturedDest: string) {
     setBridging(true);
     setBridgeError(null);
 
@@ -403,7 +492,7 @@ export function BridgePage() {
       const txidRaw = await executeUtxoToNevmBridge(
         rpcClient,
         activeNetwork,
-        "", // empty source address lets the wallet pick
+        capturedSource, // can be empty to let wallet pick
         capturedAmount,
         capturedDest
       );
@@ -426,9 +515,10 @@ export function BridgePage() {
       if (errMsg.toLowerCase().includes("walletpassphrase") || errMsg.toLowerCase().includes("passphrase")) {
         // Wallet was locked despite pre-check (race condition) — prompt for unlock
         const capturedAmountCopy = capturedAmount;
+        const capturedSourceCopy = capturedSource;
         const capturedDestCopy = capturedDest;
         setPendingBridgeAfterUnlock(() => async () => {
-          await executeBridgeTransaction(capturedAmountCopy, capturedDestCopy);
+          await executeBridgeTransaction(capturedAmountCopy, capturedSourceCopy, capturedDestCopy);
         });
         setPendingBridgeLabel(`Bridge ${capturedAmount.toFixed(8)} SYS → ${route.destLabel}`);
         updateBridgeRecord(activeNetwork, recordId, {
@@ -716,6 +806,16 @@ export function BridgePage() {
 
   // ── Validation ────────────────────────────────────────────────────────────
 
+  function handleAmountChange(value: string) {
+    let sanitized = value.replace(/,/g, '.');
+    sanitized = sanitized.replace(/[^0-9.]/g, '');
+    const parts = sanitized.split('.');
+    if (parts.length > 2) {
+      sanitized = parts[0] + '.' + parts.slice(1).join('');
+    }
+    setAmount(sanitized);
+  }
+
   const destValid =
     route.dest === "SYSCOIN_NATIVE_UTXO"
       ? destAddress.length > 10   // just non-empty for UTXO
@@ -724,9 +824,10 @@ export function BridgePage() {
   const canBridge =
     route.native &&
     amountNum > 0 &&
-    (!spendable || amountNum <= spendable) &&
+    (spendable === null || amountNum <= spendable) &&
     destValid &&
-    allChecked;
+    allChecked &&
+    !isSourceLocked;
 
   const canReview = route.native && amountNum > 0 && destValid;
 
@@ -851,6 +952,20 @@ export function BridgePage() {
                 </WarningBox>
               )}
 
+              {/* Source address */}
+              <CustomDropdown
+                label="Source Address (Optional)"
+                value={sourceAddress || "auto"}
+                options={sourceDropdownOptions}
+                onChange={(val) => setSourceAddress(val === "auto" ? "" : val)}
+              />
+
+              {isSourceLocked && (
+                <WarningBox severity="danger" title="Address Locked" className="mt-2 mb-4">
+                  This address is currently locked in Coin Control and has no spendable balance. Please unlock it in Coin Control if you wish to use its funds.
+                </WarningBox>
+              )}
+
               {/* Amount */}
               <div className="form-group mb-4">
                 <label className="form-label" htmlFor="bridge-amount">Amount (SYS)</label>
@@ -858,12 +973,11 @@ export function BridgePage() {
                   <input
                     id="bridge-amount"
                     className="input input-mono flex-1"
-                    type="number"
-                    min="0"
-                    step="0.00000001"
+                    type="text"
+                    inputMode="decimal"
                     placeholder="0.00000000"
                     value={amount}
-                    onChange={e => setAmount(e.target.value)}
+                    onChange={e => handleAmountChange(e.target.value)}
                   />
                   {spendable !== null && (
                     <button

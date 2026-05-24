@@ -62,10 +62,10 @@ export function CoinControlPage() {
     setError(null);
     setSelected(new Set());
 
-    // 1. Fetch UTXOs
+    let allUtxos: RawUtxo[] = [];
     const utxoResult = await rpcClient.listUnspent(0, 9999999, []);
     if (utxoResult.ok) {
-      setUtxos(utxoResult.value);
+      allUtxos = utxoResult.value;
     } else {
       const msg = utxoResult.error?.message ?? "";
       const noWallet = msg.toLowerCase().includes("wallet") || msg.includes("-18");
@@ -77,6 +77,16 @@ export function CoinControlPage() {
       setLoading(false);
       return;
     }
+
+    // 1b. Fetch Locked UTXOs
+    try {
+      const lockedUtxos = await rpcClient.getLockedUtxos();
+      allUtxos = [...allUtxos, ...lockedUtxos];
+    } catch (e) {
+      console.warn("Could not load locked UTXOs", e);
+    }
+    
+    setUtxos(allUtxos);
 
     // 2. Fetch Addresses
     const addrResult = await rpcClient.listReceivedByAddress(0, true);
@@ -125,6 +135,22 @@ export function CoinControlPage() {
   function handleSortAddresses(key: AddrSortKey) {
     if (addrSortKey === key) setAddrSortDir(d => d === "asc" ? "desc" : "asc");
     else { setAddrSortKey(key); setAddrSortDir("desc"); }
+  }
+
+  async function handleLock(unlock: boolean) {
+    const selectedArr = Array.from(selected).map(key => {
+      const [txid, vout] = key.split(":");
+      return { txid, vout: parseInt(vout, 10) };
+    });
+    if (selectedArr.length === 0) return;
+    
+    const res = await rpcClient.lockUnspent(unlock, selectedArr);
+    if (res.ok) {
+      load(); // Reload everything
+      setSelected(new Set()); // Clear selection after lock/unlock
+    } else {
+      alert(`Error ${unlock ? 'unlocking' : 'locking'}: ` + (res.error?.message ?? "Unknown error"));
+    }
   }
 
   // Save label RPC
@@ -301,6 +327,12 @@ export function CoinControlPage() {
                 {selected.size} UTXO{selected.size !== 1 ? "s" : ""} selected — {formatSys(selectedSys)} SYS
               </span>
               <div className="flex gap-2">
+                <button className="btn btn-ghost btn-sm" onClick={() => handleLock(false)} title="Lock selected UTXOs">
+                  🔒 Lock
+                </button>
+                <button className="btn btn-ghost btn-sm" onClick={() => handleLock(true)} title="Unlock selected UTXOs">
+                  🔓 Unlock
+                </button>
                 <button
                   className="btn btn-ghost btn-sm"
                   onClick={() => {
@@ -447,9 +479,15 @@ export function CoinControlPage() {
                           </span>
                         </td>
                         <td>
-                          <span className={`cc-spendable-badge cc-spendable-badge--${u.spendable ? "yes" : "no"}`}>
-                            {u.spendable ? "✓ Spendable" : "Locked"}
-                          </span>
+                          {u.locked ? (
+                            <span className="cc-spendable-badge cc-spendable-badge--no" title="Locked UTXOs cannot be spent automatically.">
+                              🔒 Locked
+                            </span>
+                          ) : (
+                            <span className={`cc-spendable-badge cc-spendable-badge--${u.spendable ? "yes" : "no"}`}>
+                              {u.spendable ? "✓ Spendable" : "Not Spendable"}
+                            </span>
+                          )}
                         </td>
                       </tr>
                     );
