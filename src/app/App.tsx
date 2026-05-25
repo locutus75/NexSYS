@@ -13,6 +13,7 @@ import { NodeStatusPage }       from "../features/node/NodeStatusPage";
 import { NetworkSelectorPage }  from "../features/network/NetworkSelectorPage";
 import { SettingsPage }         from "../features/settings/SettingsPage";
 import { ZkSysPage }            from "../features/zksys/ZkSysPage";
+import { RolluxPage }           from "../features/rollux/RolluxPage";
 import { TransactionsPage }     from "../features/transactions/TransactionsPage";
 import { CoinControlPage }      from "../features/utxos/CoinControlPage";
 import { SecurityPage }         from "../features/security/SecurityPage";
@@ -72,6 +73,7 @@ export function App() {
             <Route path="/node"            element={<NodeStatusPage />} />
             <Route path="/sentry"          element={<SentryNodePage />} />
             <Route path="/zksys"           element={<ZkSysPage />} />
+            <Route path="/rollux"          element={<RolluxPage />} />
             <Route path="/security"        element={<SecurityPage />} />
             <Route path="/network"         element={<NetworkSelectorPage />} />
             <Route path="/settings"        element={<SettingsPage />} />

@@ -6,7 +6,7 @@ import "./Sidebar.css";
 interface NavItem {
   id: string;
   label: string;
-  icon: string;
+  icon: React.ReactNode;
   to: string;
   dividerBefore?: boolean;
 }
@@ -21,6 +21,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: "nav-utxos",        label: "Coin Control",       icon: "⊞",  to: "/utxos" },
   { id: "nav-node",         label: "Node Status",        icon: "⬡",  to: "/node", dividerBefore: true },
   { id: "nav-sentry",       label: "Sentry Node",        icon: "🛡", to: "/sentry" },
+  { id: "nav-rollux",       label: "Rollux",             icon: <img src="/rollux.svg" alt="Rollux" style={{width: "16px", height: "16px"}} />, to: "/rollux" },
   { id: "nav-zksys",        label: "zkSYS",              icon: "⚡", to: "/zksys" },
   { id: "nav-security",     label: "Security & Backup",  icon: "🔐", to: "/security", dividerBefore: true },
   { id: "nav-network",      label: "Network",            icon: "🌐", to: "/network" },

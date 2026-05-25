@@ -9,6 +9,7 @@ import { ConfirmDialog } from "../../components/shared/ConfirmDialog";
 import { classifyAddress } from "../../services/addressClassifier";
 import { validateSendIntent } from "../../services/sendValidator";
 import { useNetworkStore } from "../../store/networkStore";
+import { fetchAllEvmBalances, sendEvmTransaction } from "../../services/evmRpcClient";
 import type { ChainEnvironment } from "../../types/chain";
 import { CHAIN_LABELS } from "../../types/chain";
 import type { ValidationAction } from "../../services/sendValidator";
@@ -20,8 +21,15 @@ import "./SendPage.css";
 const SOURCE_CHAINS: ChainEnvironment[] = ["SYSCOIN_NATIVE_UTXO", "SYSCOIN_NEVM", "ROLLUX", "ZKSYS"];
 
 export function SendPage() {
-  const { activeNetwork, rpcClient } = useNetworkStore();
+  const { activeNetwork, rpcClient, evmAddress, isCredentialsSaved, decryptPrivateKey } = useNetworkStore();
   const [sourceChain, setSourceChain] = useState<ChainEnvironment>("SYSCOIN_NATIVE_UTXO");
+
+  // Prevent invalid chain selection when network changes
+  useEffect(() => {
+    if (activeNetwork === "MAINNET" && sourceChain === "ZKSYS") {
+      setSourceChain("SYSCOIN_NATIVE_UTXO");
+    }
+  }, [activeNetwork, sourceChain]);
   const [destination, setDestination] = useState("");
   const [amount, setAmount] = useState("");
   const [validation, setValidation] = useState<{ action: ValidationAction; reason: string; suggested?: string } | null>(null);
@@ -41,6 +49,8 @@ export function SendPage() {
   // Live balance
   const [spendable, setSpendable] = useState<number | null>(null);
   const [balanceError, setBalanceError] = useState<string | null>(null);
+  const [evmSpendable, setEvmSpendable] = useState<number | null>(null);
+  const [evmBalanceError, setEvmBalanceError] = useState<string | null>(null);
 
   // Fee estimate
   const [feeRate, setFeeRate] = useState<number | null>(null);   // SYS/kB
@@ -56,6 +66,11 @@ export function SendPage() {
   const [unlockTimeout, setUnlockTimeout] = useState("300");
   const [unlockError, setUnlockError] = useState<string | null>(null);
   const [unlocking, setUnlocking] = useState(false);
+
+  // Web3 unlock state
+  const [evmUnlockDialogOpen, setEvmUnlockDialogOpen] = useState(false);
+  const [evmPassword, setEvmPassword] = useState("");
+  const [evmUnlockError, setEvmUnlockError] = useState<string | null>(null);
 
   // Fetch balance on mount and when wallet changes
   const fetchBalance = useCallback(async () => {
@@ -119,6 +134,26 @@ export function SendPage() {
     }
   }, [rpcClient]);
 
+  // Fetch EVM balance for selected chain
+  const fetchEvmBalance = useCallback(async () => {
+    if (!evmAddress || sourceChain === "SYSCOIN_NATIVE_UTXO") {
+      setEvmSpendable(null);
+      setEvmBalanceError(null);
+      return;
+    }
+    setEvmSpendable(null);
+    setEvmBalanceError(null);
+    try {
+      const balances = await fetchAllEvmBalances(activeNetwork, evmAddress);
+      if (sourceChain === "SYSCOIN_NEVM" && balances.nevm) setEvmSpendable(parseFloat(balances.nevm.sys));
+      if (sourceChain === "ROLLUX" && balances.rollux) setEvmSpendable(parseFloat(balances.rollux.sys));
+      if (sourceChain === "ZKSYS" && balances.zksys) setEvmSpendable(parseFloat(balances.zksys.sys));
+    } catch (e) {
+      console.warn("Failed to fetch EVM balance in SendPage", e);
+      setEvmBalanceError("Could not fetch EVM balance. RPC endpoint might be offline.");
+    }
+  }, [activeNetwork, evmAddress, sourceChain]);
+
   // Fetch fee rate
   const fetchFeeRate = useCallback(async (target: number) => {
     const res = await rpcClient.estimateSmartFee(target);
@@ -177,11 +212,60 @@ export function SendPage() {
     }
   };
 
+  const handleEvmUnlock = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setEvmUnlockError(null);
+    setUnlocking(true);
+
+    let privateKey = "";
+    try {
+      privateKey = await decryptPrivateKey(evmPassword);
+    } catch (err: any) {
+      if (err.message && (err.message.includes("decryption") || err.message.includes("Padding") || err.message.includes("mac"))) {
+        setEvmUnlockError("Incorrect master password. Decryption failed.");
+      } else {
+        setEvmUnlockError(err.message || "Failed to decrypt wallet.");
+      }
+      setUnlocking(false);
+      return; // Stop here, leave dialog open to let user try again
+    }
+
+    // Decryption successful, close dialog and start sending process
+    setEvmUnlockDialogOpen(false);
+    setEvmPassword("");
+    setUnlocking(false);
+    
+    setSending(true);
+    setSendError(null);
+    try {
+      const hash = await sendEvmTransaction(
+        activeNetwork,
+        sourceChain as "SYSCOIN_NEVM" | "ROLLUX" | "ZKSYS",
+        destination.trim(),
+        amount,
+        privateKey
+      );
+      setTxid(hash);
+      setDestination("");
+      setAmount("");
+      setValidation(null);
+      fetchEvmBalance();
+    } catch (err: any) {
+      setSendError(err.message || "Failed to send EVM transaction.");
+    } finally {
+      setSending(false);
+    }
+  };
+
   useEffect(() => {
-    fetchBalance();
-    fetchFeeRate(feeTarget);
-    fetchWalletStatus();
-  }, [fetchBalance, fetchFeeRate, feeTarget, fetchWalletStatus]);
+    if (sourceChain === "SYSCOIN_NATIVE_UTXO") {
+      fetchBalance();
+      fetchFeeRate(feeTarget);
+      fetchWalletStatus();
+    } else {
+      fetchEvmBalance();
+    }
+  }, [sourceChain, fetchBalance, fetchEvmBalance, fetchFeeRate, feeTarget, fetchWalletStatus]);
 
   const displaySpendable = useMemo(() => {
     if (selectedSourceAddress === "auto" || sourceChain !== "SYSCOIN_NATIVE_UTXO") {
@@ -198,12 +282,38 @@ export function SendPage() {
   }, [selectedSourceAddress, sourceChain, sourceAddresses]);
 
   function setMax() {
-    if (displaySpendable === null) return;
-    const fee = estFee ?? 0.0001;
-    const maxAmt = Math.max(0, displaySpendable - fee);
+    const currentSpendable = sourceChain === "SYSCOIN_NATIVE_UTXO" ? displaySpendable : evmSpendable;
+    if (currentSpendable === null) return;
+    const fee = sourceChain === "SYSCOIN_NATIVE_UTXO" ? (estFee ?? 0.0001) : 0.0005; // Dummy fee for EVM max
+    const maxAmt = Math.max(0, currentSpendable - fee);
     setAmount(maxAmt.toFixed(8));
   }
 
+
+  // Trigger validation automatically whenever these inputs change
+  useEffect(() => {
+    const trimmed = destination.trim();
+    if (!trimmed) {
+      setValidation(null);
+      setAddressLabel("");
+      return;
+    }
+    const intent = {
+      sourceChain,
+      network: activeNetwork,
+      destinationAddress: trimmed,
+      asset: "SYS",
+      amount: amount || "0",
+      isCredentialsSaved,
+    };
+    const result = validateSendIntent(intent);
+    setValidation({
+      action: result.action,
+      reason: result.reason,
+      suggested: result.suggestedAction,
+    });
+    setAddressLabel(classifyAddress(trimmed, activeNetwork).label);
+  }, [destination, amount, sourceChain, activeNetwork, isCredentialsSaved]);
 
   function handleDestinationChange(value: string) {
     setDestination(value);
@@ -219,24 +329,6 @@ export function SendPage() {
     } else {
       setDestinationSelectMode("custom");
     }
-
-    if (!trimmed) { setValidation(null); return; }
-
-    const intent = {
-      sourceChain,
-      network: activeNetwork,
-      destinationAddress: trimmed,
-      asset: "SYS",
-      amount: amount || "0",
-    };
-    const result = validateSendIntent(intent);
-    setValidation({
-      action: result.action,
-      reason: result.reason,
-      suggested: result.suggestedAction,
-    });
-    // Also show address type label
-    setAddressLabel(classifyAddress(trimmed, activeNetwork).label);
   }
 
   function handleAmountChange(value: string) {
@@ -247,11 +339,10 @@ export function SendPage() {
       sanitized = parts[0] + '.' + parts.slice(1).join('');
     }
     setAmount(sanitized);
-    if (destination.trim()) handleDestinationChange(destination);
   }
 
   function handleReview() {
-    // Intercept if wallet is locked
+    // Intercept if UTXO wallet is locked
     if (sourceChain === "SYSCOIN_NATIVE_UTXO" && walletInfo && walletInfo.unlocked_until === 0) {
       setUnlockError("Please unlock your wallet to proceed with sending.");
       setUnlockDialogOpen(true);
@@ -265,6 +356,7 @@ export function SendPage() {
       destinationAddress: destination.trim(),
       asset: "SYS",
       amount,
+      isCredentialsSaved,
     };
     const result = validateSendIntent(intent);
     setValidation({ action: result.action, reason: result.reason, suggested: result.suggestedAction });
@@ -274,6 +366,13 @@ export function SendPage() {
 
   async function handleConfirmedSend() {
     setConfirmOpen(false);
+
+    // If EVM chain, intercept with Web3 password dialog
+    if (sourceChain !== "SYSCOIN_NATIVE_UTXO") {
+      setEvmUnlockDialogOpen(true);
+      return;
+    }
+
     setSending(true);
     setSendError(null);
 
@@ -339,11 +438,13 @@ export function SendPage() {
   }
 
   const chainDropdownOptions = useMemo<CustomDropdownOption[]>(() => {
-    return SOURCE_CHAINS.map((c) => ({
-      value: c,
-      label: CHAIN_LABELS[c],
-    }));
-  }, []);
+    return SOURCE_CHAINS
+      .filter((c) => !(c === "ZKSYS" && activeNetwork === "MAINNET"))
+      .map((c) => ({
+        value: c,
+        label: CHAIN_LABELS[c],
+      }));
+  }, [activeNetwork]);
 
   const sourceDropdownOptions = useMemo<CustomDropdownOption[]>(() => {
     const opts: CustomDropdownOption[] = [
@@ -413,13 +514,22 @@ export function SendPage() {
           />
 
           {/* Source Address (Send From) */}
-          {sourceChain === "SYSCOIN_NATIVE_UTXO" && (
+          {sourceChain === "SYSCOIN_NATIVE_UTXO" ? (
             <CustomDropdown
               label="Source Address (Send From)"
               value={selectedSourceAddress}
               options={sourceDropdownOptions}
               onChange={setSelectedSourceAddress}
             />
+          ) : (
+            <div className="form-group">
+              <label className="form-label">Source Address (Web3 Wallet)</label>
+              <input
+                className="input input-mono"
+                value={evmAddress}
+                disabled
+              />
+            </div>
           )}
 
           {/* Destination Account Selector */}
@@ -439,202 +549,238 @@ export function SendPage() {
             />
           )}
 
-          {/* Destination */}
-          <div className="form-group">
-            <label className="form-label" htmlFor="send-destination">Destination Address</label>
-            <input
-              id="send-destination"
-              className="input input-mono"
-              placeholder="sys1q… or 0x…"
-              value={destination}
-              onChange={(e) => handleDestinationChange(e.target.value)}
-              autoComplete="off"
-              spellCheck={false}
-            />
-            {addressLabel && destination && (
-              <span className="form-hint">Detected: {addressLabel}</span>
-            )}
-          </div>
-
-          {/* Amount */}
-          <div className="form-group">
-            <label className="form-label" htmlFor="send-amount">Amount (SYS)</label>
-            <input
-              id="send-amount"
-              className="input input-mono"
-              type="text"
-              inputMode="decimal"
-              placeholder="0.00000000"
-              value={amount}
-              onChange={(e) => handleAmountChange(e.target.value)}
-            />
-          </div>
-
-          {/* Validation feedback */}
-          {isSourceLocked && (
-            <WarningBox severity="danger" title="Address Locked" className="mt-4">
-              This address is currently locked in Coin Control and has no spendable balance. Please unlock it in Coin Control if you wish to spend its funds.
+          {/* If EVM chain but no credentials, block entirely */}
+          {sourceChain !== "SYSCOIN_NATIVE_UTXO" && !isCredentialsSaved ? (
+            <WarningBox severity="danger" title="Web3 Wallet Required" className="mt-4">
+              Sending directly from {CHAIN_LABELS[sourceChain]} requires a configured Web3 wallet.
+              <br/><br/>
+              Please go to Settings to import your EVM Private Key or Mnemonic phrase.
             </WarningBox>
-          )}
+          ) : (
+            <>
+              {/* Destination */}
+              <div className="form-group">
+                <label className="form-label" htmlFor="send-destination">Destination Address</label>
+                <input
+                  id="send-destination"
+                  className="input input-mono"
+                  placeholder="sys1q… or 0x…"
+                  value={destination}
+                  onChange={(e) => handleDestinationChange(e.target.value)}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                {addressLabel && destination && (
+                  <span className="form-hint">Detected: {addressLabel}</span>
+                )}
+              </div>
 
-          {!isSourceLocked && validation && (
-            <WarningBox
-              severity={validation.action === "BLOCK" ? "danger" : validation.action === "WARN" ? "warn" : "success"}
-              title={validation.action === "BLOCK" ? "Send blocked" : validation.action === "WARN" ? "Warning" : "Ready to send"}
-              className="mt-4"
-            >
-              {validation.reason}
-              {validation.suggested && (
-                <div className="mt-2 text-xs" style={{ opacity: 0.85 }}>
-                  <strong>Suggested action:</strong> {validation.suggested}
-                </div>
+              {/* Amount */}
+              <div className="form-group">
+                <label className="form-label" htmlFor="send-amount">Amount (SYS)</label>
+                <input
+                  id="send-amount"
+                  className="input input-mono"
+                  type="text"
+                  inputMode="decimal"
+                  placeholder="0.00000000"
+                  value={amount}
+                  onChange={(e) => handleAmountChange(e.target.value)}
+                />
+              </div>
+
+              {/* Validation feedback */}
+              {isSourceLocked && (
+                <WarningBox severity="danger" title="Address Locked" className="mt-4">
+                  This address is currently locked in Coin Control and has no spendable balance. Please unlock it in Coin Control if you wish to spend its funds.
+                </WarningBox>
               )}
-            </WarningBox>
-          )}
 
-          {/* TX success */}
-          {txid && (
-            <WarningBox severity="success" title="Transaction sent!" className="mt-4">
-              TXID: <span className="font-mono text-xs break-all">{txid}</span>
-            </WarningBox>
-          )}
+              {!isSourceLocked && validation && validation.reason !== "Invalid or zero amount specified." && (
+                <WarningBox
+                  severity={validation.action === "BLOCK" ? "danger" : validation.action === "WARN" ? "warn" : "success"}
+                  title={validation.action === "BLOCK" ? "Send blocked" : validation.action === "WARN" ? "Warning" : "Ready to send"}
+                  className="mt-4"
+                >
+                  {validation.reason}
+                  {validation.suggested && (
+                    <div className="mt-2 text-xs" style={{ opacity: 0.85 }}>
+                      <strong>Suggested action:</strong> {validation.suggested}
+                    </div>
+                  )}
+                </WarningBox>
+              )}
 
-          {/* Send error */}
-          {sendError && (
-            <WarningBox severity="danger" title="Send failed" className="mt-4">
-              {sendError}
-            </WarningBox>
-          )}
+              {/* TX success */}
+              {txid && (
+                <WarningBox severity="success" title="Transaction sent!" className="mt-4">
+                  TXID: <span className="font-mono text-xs break-all">{txid}</span>
+                </WarningBox>
+              )}
 
-          <button
-            id="send-review-btn"
-            className="btn btn-primary w-full mt-6"
-            onClick={handleReview}
-            disabled={!canReview || sending || isSourceLocked}
-          >
-            {sending ? <><div className="spinner" /> Sending…</> : "Review & Send"}
-          </button>
+              {/* Send error */}
+              {sendError && (
+                <WarningBox severity="danger" title="Send failed" className="mt-4">
+                  {sendError}
+                </WarningBox>
+              )}
+
+              <button
+                id="send-review-btn"
+                className="btn btn-primary w-full mt-6"
+                onClick={handleReview}
+                disabled={!canReview || sending || isSourceLocked}
+              >
+                {sending ? <><div className="spinner" /> Sending…</> : "Review & Send"}
+              </button>
+            </>
+          )}
         </div>
 
-        {/* Side info */}
-        <div className="flex flex-col gap-4">
-          {/* Wallet Status */}
-          <div className="card">
-            <div className="stat-label mb-3">Wallet Status</div>
-            {walletStatusError ? (
-              <p className="text-xs text-danger">{walletStatusError}</p>
-            ) : walletInfo === null ? (
-              <div className="flex items-center gap-2">
-                <div className="spinner" />
-                <span className="text-muted text-xs">Loading status…</span>
-              </div>
-            ) : (
-              <div className="flex flex-col gap-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-secondary">Encryption:</span>
-                  {walletInfo.unlocked_until === undefined ? (
-                    <span className="badge badge-success text-xs" style={{ background: "rgba(34, 197, 94, 0.15)", color: "#22c55e", padding: "2px 6px", borderRadius: "3px" }}>Unencrypted</span>
-                  ) : (
-                    <span className="badge badge-warning text-xs" style={{ background: "rgba(245, 158, 11, 0.15)", color: "#f59e0b", padding: "2px 6px", borderRadius: "3px" }}>Encrypted</span>
-                  )}
+        {/* Right column: Status & Fees */}
+        <div className="flex flex-col gap-6">
+          {/* Wallet Status - only show for UTXO */}
+          {sourceChain === "SYSCOIN_NATIVE_UTXO" && (
+            <div className="card">
+              <div className="stat-label mb-3">Wallet Status</div>
+              {walletStatusError ? (
+                <p className="text-xs text-danger">{walletStatusError}</p>
+              ) : walletInfo === null ? (
+                <div className="flex items-center gap-2">
+                  <div className="spinner" />
+                  <span className="text-muted text-xs">Loading…</span>
                 </div>
-                {walletInfo.unlocked_until !== undefined && (
+              ) : (
+                <div>
                   <div className="flex items-center justify-between">
-                    <span className="text-xs text-secondary">Status:</span>
+                    <span className="text-sm font-semibold truncate" title={walletInfo.walletname || "Default wallet"}>
+                      {walletInfo.walletname || "Default wallet"}
+                    </span>
                     {walletInfo.unlocked_until === 0 ? (
-                      <span className="text-danger font-semibold text-xs flex items-center gap-1">
+                      <span className="badge badge--danger" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
                         🔒 Locked
                       </span>
                     ) : (
-                      <span className="text-success font-semibold text-xs flex items-center gap-1">
+                      <span className="badge badge--success" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
                         🔓 Unlocked
                       </span>
                     )}
                   </div>
-                )}
-                {walletInfo.unlocked_until !== undefined && walletInfo.unlocked_until > 0 && (
-                  <div className="text-xs text-muted mt-1" style={{ textAlign: "right" }}>
-                    Expires: {new Date(walletInfo.unlocked_until * 1000).toLocaleTimeString()}
-                  </div>
-                )}
-                
-                {walletInfo.unlocked_until === 0 && (
-                  <button
-                    className="btn btn-primary btn-sm mt-3 w-full"
-                    onClick={() => {
-                      setUnlockError(null);
-                      setUnlockDialogOpen(true);
-                    }}
-                  >
-                    Unlock Wallet
-                  </button>
-                )}
-                {walletInfo.unlocked_until !== undefined && walletInfo.unlocked_until > 0 && (
-                  <button
-                    className="btn btn-secondary btn-sm mt-3 w-full"
-                    onClick={handleLock}
-                  >
-                    Lock Wallet
-                  </button>
-                )}
-              </div>
-            )}
-          </div>
+                  {walletInfo.unlocked_until !== undefined && walletInfo.unlocked_until > 0 && (
+                    <div className="text-xs text-muted mt-1" style={{ textAlign: "right" }}>
+                      Expires: {new Date(walletInfo.unlocked_until * 1000).toLocaleTimeString()}
+                    </div>
+                  )}
+                  
+                  {walletInfo.unlocked_until === 0 && (
+                    <button
+                      className="btn btn-primary btn-sm mt-3 w-full"
+                      onClick={() => {
+                        setUnlockError(null);
+                        setUnlockDialogOpen(true);
+                      }}
+                    >
+                      Unlock Wallet
+                    </button>
+                  )}
+                  {walletInfo.unlocked_until !== undefined && walletInfo.unlocked_until > 0 && (
+                    <button
+                      className="btn btn-secondary btn-sm mt-3 w-full"
+                      onClick={handleLock}
+                    >
+                      Lock Wallet
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Available balance */}
           <div className="card">
             <div className="stat-label mb-3">Available Balance</div>
-            {balanceError ? (
-              <p className="text-xs text-danger">{balanceError}</p>
-            ) : displaySpendable === null ? (
-              <div className="flex items-center gap-2"><div className="spinner" /><span className="text-muted text-xs">Loading…</span></div>
-            ) : (
-              <div>
-                <div className="stat-value" style={{ fontSize: "1.4rem" }}>
-                  {displaySpendable.toFixed(8)} <span className="text-muted" style={{ fontSize: "0.8rem" }}>SYS</span>
+            {sourceChain === "SYSCOIN_NATIVE_UTXO" ? (
+              balanceError ? (
+                <p className="text-xs text-danger">{balanceError}</p>
+              ) : displaySpendable === null ? (
+                <div className="flex items-center gap-2"><div className="spinner" /><span className="text-muted text-xs">Loading…</span></div>
+              ) : (
+                <div>
+                  <div className="stat-value" style={{ fontSize: "1.4rem" }}>
+                    {displaySpendable.toFixed(8)} <span className="text-muted" style={{ fontSize: "0.8rem" }}>SYS</span>
+                  </div>
+                  <button
+                    id="send-max-btn"
+                    className="btn btn-ghost btn-sm mt-2"
+                    onClick={setMax}
+                    disabled={displaySpendable <= 0}
+                  >
+                    Send max
+                  </button>
                 </div>
-                <button
-                  id="send-max-btn"
-                  className="btn btn-ghost btn-sm mt-2"
-                  onClick={setMax}
-                  disabled={displaySpendable <= 0}
-                >
-                  Send max
-                </button>
-              </div>
+              )
+            ) : (
+              evmBalanceError ? (
+                <p className="text-xs text-danger">{evmBalanceError}</p>
+              ) : evmSpendable === null ? (
+                <div className="flex items-center gap-2"><div className="spinner" /><span className="text-muted text-xs">Loading…</span></div>
+              ) : (
+                <div>
+                  <div className="stat-value" style={{ fontSize: "1.4rem" }}>
+                    {evmSpendable.toFixed(8)} <span className="text-muted" style={{ fontSize: "0.8rem" }}>SYS</span>
+                  </div>
+                  <button
+                    id="send-max-btn"
+                    className="btn btn-ghost btn-sm mt-2"
+                    onClick={setMax}
+                    disabled={evmSpendable <= 0}
+                  >
+                    Send max
+                  </button>
+                </div>
+              )
             )}
           </div>
 
           {/* Fee estimate */}
-          <div className="card">
-            <div className="stat-label mb-3">Fee Estimate</div>
-            <div className="flex gap-2 mb-3">
-              {([6, 3, 1] as const).map(t => (
-                <button
-                  key={t}
-                  className={`btn btn-sm ${feeTarget === t ? "btn-primary" : "btn-ghost"}`}
-                  onClick={() => { setFeeTarget(t); }}
-                  id={`send-fee-target-${t}`}
-                >
-                  {t === 1 ? "Fast (1 blk)" : t === 3 ? "Normal (3)" : "Economy (6)"}
-                </button>
-              ))}
-            </div>
-            {feeRate === null ? (
-              <p className="text-xs text-secondary">Fee estimate unavailable (node not synced enough).</p>
-            ) : (
-              <div className="flex flex-col gap-1">
-                <div className="flex justify-between text-xs">
-                  <span className="text-muted">Rate</span>
-                  <span className="font-mono">{(feeRate * 1000).toFixed(5)} SYS/byte</span>
-                </div>
-                <div className="flex justify-between text-xs">
-                  <span className="text-muted">Est. fee</span>
-                  <span className="font-mono text-warning">~{estFee?.toFixed(8) ?? "—"} SYS</span>
-                </div>
+          {sourceChain === "SYSCOIN_NATIVE_UTXO" ? (
+            <div className="card">
+              <div className="stat-label mb-3">Fee Estimate</div>
+              <div className="flex gap-2 mb-3">
+                {([6, 3, 1] as const).map(t => (
+                  <button
+                    key={t}
+                    className={`btn btn-sm ${feeTarget === t ? "btn-primary" : "btn-ghost"}`}
+                    onClick={() => { setFeeTarget(t); }}
+                    id={`send-fee-target-${t}`}
+                  >
+                    {t === 1 ? "Fast (1 blk)" : t === 3 ? "Normal (3)" : "Economy (6)"}
+                  </button>
+                ))}
               </div>
-            )}
-          </div>
+              {feeRate === null ? (
+                <p className="text-xs text-secondary">Fee estimate unavailable (node not synced enough).</p>
+              ) : (
+                <div className="flex flex-col gap-1">
+                  <div className="flex justify-between text-xs">
+                    <span className="text-muted">Rate</span>
+                    <span className="font-mono">{(feeRate * 1000).toFixed(5)} SYS/byte</span>
+                  </div>
+                  <div className="flex justify-between text-xs">
+                    <span className="text-muted">Est. fee</span>
+                    <span className="font-mono text-warning">~{estFee?.toFixed(8) ?? "—"} SYS</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="card">
+              <div className="stat-label mb-3">Network Fee</div>
+              <p className="text-xs text-secondary">
+                Gas fees for {CHAIN_LABELS[sourceChain]} are automatically calculated and deducted during the transaction. Ensure you have enough SYS to cover gas.
+              </p>
+            </div>
+          )}
 
           <WarningBox severity="info" title="Safety check">
             NexSYS automatically detects the address format and blocks unsafe chain combinations.
@@ -749,6 +895,63 @@ export function SendPage() {
                 disabled={unlocking}
               >
                 {unlocking ? "Unlocking…" : "Unlock"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {evmUnlockDialogOpen && (
+        <div className="dialog-overlay" onClick={() => setEvmUnlockDialogOpen(false)} role="presentation">
+          <form
+            className="dialog animate-fade-in"
+            onSubmit={handleEvmUnlock}
+            onClick={(e) => e.stopPropagation()}
+            style={{ width: "100%", maxWidth: "420px" }}
+          >
+            <div className="dialog__header">
+              <span className="dialog__icon">🦊</span>
+              <h3 className="dialog__title">Unlock Web3 Wallet</h3>
+            </div>
+            <p className="dialog__desc" style={{ marginBottom: "var(--space-4)" }}>
+              Enter your master password to decrypt your Web3 wallet and send {CHAIN_LABELS[sourceChain]} SYS.
+            </p>
+            
+            <div className="form-group" style={{ textAlign: "left", width: "100%", marginBottom: "var(--space-4)" }}>
+              <label className="form-label" htmlFor="evm-unlock-password">Master Password</label>
+              <input
+                id="evm-unlock-password"
+                className="input"
+                type="password"
+                required
+                value={evmPassword}
+                onChange={(e) => setEvmPassword(e.target.value)}
+                placeholder="Password"
+                autoFocus
+              />
+            </div>
+
+            {evmUnlockError && (
+              <WarningBox severity="danger" title="Unlock failed" className="mb-4">
+                {evmUnlockError}
+              </WarningBox>
+            )}
+
+            <div className="dialog__actions">
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setEvmUnlockDialogOpen(false)}
+                disabled={unlocking}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="btn btn-primary"
+                disabled={unlocking}
+              >
+                {unlocking ? "Signing…" : "Sign & Send"}
               </button>
             </div>
           </form>

@@ -40,6 +40,7 @@ export function OverviewPage() {
   // EVM balances
   const [nevmBalance,   setNevmBalance]   = useState<string | null>(null);
   const [rolluxBalance, setRolluxBalance] = useState<string | null>(null);
+  const [zksysBalance,  setZksysBalance]  = useState<string | null>(null);
   const [evmLoading,    setEvmLoading]    = useState(false);
 
   const fetchUtxoBalance = useCallback(async (background = false) => {
@@ -105,9 +106,10 @@ export function OverviewPage() {
   const fetchEvmBalances = useCallback(async (background = false) => {
     if (!evmAddress) return;
     if (!background) setEvmLoading(true);
-    const { nevm, rollux } = await fetchAllEvmBalances(activeNetwork, evmAddress);
+    const { nevm, rollux, zksys } = await fetchAllEvmBalances(activeNetwork, evmAddress);
     setNevmBalance(nevm?.sys ?? null);
     setRolluxBalance(rollux?.sys ?? null);
+    setZksysBalance(zksys?.sys ?? null);
     if (!background) setEvmLoading(false);
   }, [evmAddress, activeNetwork]);
 
@@ -239,19 +241,15 @@ export function OverviewPage() {
         </div>
 
         {/* zkSYS card */}
-        <div className="card">
-          <div className="stat-label mb-4">zkSYS Status</div>
-          <div className="flex flex-col gap-2">
-            <div className="badge badge--devnet" style={{ width: "fit-content" }}>Future chain</div>
-            <p className="text-sm text-secondary mt-2">
-              zkSYS is a future chain environment. When public interfaces become available,
-              your zkSYS balance and proving status will appear here.
-            </p>
-          </div>
-          <Link to="/zksys" id="overview-zksys-link" className="btn btn-ghost btn-sm mt-4 w-full">
-            zkSYS Details →
-          </Link>
-        </div>
+        <BalanceCard
+          chain="ZKSYS"
+          network={activeNetwork}
+          confirmed={zksysBalance ?? "—"}
+          loading={evmLoading && zksysBalance === null}
+          description={evmAddress
+            ? "SYS on the zkSYS zero-knowledge proof layer."
+            : "Set your 0x address in Settings to see your zkSYS balance."}
+        />
 
         {/* Security card */}
         <div className="card">

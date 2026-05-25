@@ -13,17 +13,21 @@ export interface EvmBalance {
 
 // ── Public RPC endpoints ──────────────────────────────────────────────────────
 
-export const EVM_RPC: Record<string, { nevm: string; rollux: string }> = {
+import { ethers } from "ethers";
+
+export const EVM_RPC: Record<string, { nevm: string; rollux: string; zksys: string }> = {
   MAINNET: {
     nevm:   "https://rpc.syscoin.org",
     rollux: "https://rpc.rollux.com",
+    zksys:  "",
   },
   TESTNET: {
     nevm:   "https://rpc.tanenbaum.io",
     rollux: "https://rpc-tanenbaum.rollux.com",
+    zksys:  "https://rpc-zk.tanenbaum.io/",
   },
-  REGTEST:  { nevm: "", rollux: "" },
-  DEVNET:   { nevm: "", rollux: "" },
+  REGTEST:  { nevm: "", rollux: "", zksys: "" },
+  DEVNET:   { nevm: "", rollux: "", zksys: "" },
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -62,7 +66,13 @@ export async function fetchEvmBalance(
     params: [address, "latest"],
   });
 
-  const res = await fetch(rpcUrl, {
+  let fetchUrl = rpcUrl;
+  const isBrowserDev = typeof window !== "undefined" && !(window as any).__TAURI__;
+  if (isBrowserDev) {
+    fetchUrl = `${window.location.origin}/rpc-proxy?target=${encodeURIComponent(rpcUrl)}`;
+  }
+
+  const res = await fetch(fetchUrl, {
     method:  "POST",
     headers: { "Content-Type": "application/json" },
     body,
@@ -82,17 +92,85 @@ export async function fetchAllEvmBalances(
   network: string,
   address: string,
   signal?: AbortSignal
-): Promise<{ nevm: EvmBalance | null; rollux: EvmBalance | null; errors: string[] }> {
+): Promise<{ nevm: EvmBalance | null; rollux: EvmBalance | null; zksys: EvmBalance | null; errors: string[] }> {
   const endpoints = EVM_RPC[network] ?? EVM_RPC.MAINNET;
   const errors: string[] = [];
 
-  const [nevmResult, rolluxResult] = await Promise.allSettled([
+  const [nevmResult, rolluxResult, zksysResult] = await Promise.allSettled([
     endpoints.nevm   ? fetchEvmBalance(endpoints.nevm,   address, signal) : Promise.reject(new Error("No NEVM endpoint")),
     endpoints.rollux ? fetchEvmBalance(endpoints.rollux, address, signal) : Promise.reject(new Error("No Rollux endpoint")),
+    endpoints.zksys  ? fetchEvmBalance(endpoints.zksys,  address, signal) : Promise.reject(new Error("No zkSYS endpoint")),
   ]);
 
   const nevm   = nevmResult.status   === "fulfilled" ? nevmResult.value   : (errors.push(`NEVM: ${nevmResult.reason?.message}`),   null);
   const rollux = rolluxResult.status === "fulfilled" ? rolluxResult.value : (errors.push(`Rollux: ${rolluxResult.reason?.message}`), null);
+  const zksys  = zksysResult.status  === "fulfilled" ? zksysResult.value  : (errors.push(`zkSYS: ${zksysResult.reason?.message}`), null);
 
-  return { nevm, rollux, errors };
+  return { nevm, rollux, zksys, errors };
+}
+
+/**
+ * Sends a native SYS (ETH-equivalent) transaction on the specified EVM chain.
+ * Uses ethers.js internally.
+ */
+export async function sendEvmTransaction(
+  network: string,
+  chain: "SYSCOIN_NEVM" | "ROLLUX" | "ZKSYS",
+  toAddress: string,
+  amountInSys: string,
+  privateKey: string
+): Promise<string> {
+  const endpoints = EVM_RPC[network] ?? EVM_RPC.MAINNET;
+  let rpcUrl = "";
+  if (chain === "SYSCOIN_NEVM") rpcUrl = endpoints.nevm;
+  else if (chain === "ROLLUX") rpcUrl = endpoints.rollux;
+  else if (chain === "ZKSYS") rpcUrl = endpoints.zksys;
+
+  if (!rpcUrl) {
+    throw new Error(`No RPC URL configured for ${chain} on ${network}`);
+  }
+
+  let finalUrl = rpcUrl;
+  const isBrowserDev = typeof window !== "undefined" && !(window as any).__TAURI__;
+  if (isBrowserDev) {
+    finalUrl = `${window.location.origin}/rpc-proxy?target=${encodeURIComponent(rpcUrl)}`;
+  }
+
+  let networkData: ethers.Networkish | undefined;
+  if (network === "TESTNET") {
+    if (chain === "ROLLUX") networkData = { name: "rollux-testnet", chainId: 57000 };
+    else if (chain === "ZKSYS") networkData = { name: "zksys-testnet", chainId: 57057 };
+    else if (chain === "SYSCOIN_NEVM") networkData = { name: "nevm-testnet", chainId: 5700 };
+  } else if (network === "MAINNET") {
+    if (chain === "ROLLUX") networkData = { name: "rollux-mainnet", chainId: 570 };
+    else if (chain === "ZKSYS") networkData = { name: "zksys-mainnet", chainId: 57057 }; // Placeholder for future mainnet
+    else if (chain === "SYSCOIN_NEVM") networkData = { name: "nevm-mainnet", chainId: 57 };
+  }
+
+  const provider = new ethers.JsonRpcProvider(finalUrl, networkData, { staticNetwork: true });
+  
+  // Ensure the private key is properly formatted
+  const formattedKey = privateKey.startsWith("0x") ? privateKey : `0x${privateKey}`;
+  const wallet = new ethers.Wallet(formattedKey, provider);
+
+  const amountWei = ethers.parseEther(amountInSys);
+
+  try {
+    const tx = await wallet.sendTransaction({
+      to: toAddress,
+      value: amountWei,
+    });
+    return tx.hash;
+  } catch (err: any) {
+    if (err.message && err.message.includes("Failed to fetch")) {
+      throw new Error(
+        "Network connection failed. This can happen if the RPC node is offline, or if you don't have enough extra SYS to cover the gas fee (which causes the node to reject the transaction)."
+      );
+    }
+    // Also catch typical insufficient funds from ethers
+    if (err.code === "INSUFFICIENT_FUNDS") {
+      throw new Error("Insufficient funds to cover the amount + gas fee.");
+    }
+    throw err;
+  }
 }

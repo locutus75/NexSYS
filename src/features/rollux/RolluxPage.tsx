@@ -1,15 +1,10 @@
-/**
- * features/zksys/ZkSysPage.tsx
- * zkSYS readiness and status screen.
- */
-
 import { useState, useEffect } from "react";
 import { WarningBox } from "../../components/shared/WarningBox";
 import { useNetworkStore } from "../../store/networkStore";
 import { NETWORK_LABELS } from "../../types/chain";
 import { fetchAllEvmBalances } from "../../services/evmRpcClient";
 
-export function ZkSysPage() {
+export function RolluxPage() {
   const { activeNetwork, evmAddress } = useNetworkStore();
   const [balance, setBalance] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -25,7 +20,7 @@ export function ZkSysPage() {
     fetchAllEvmBalances(activeNetwork, evmAddress)
       .then(res => {
         if (!active) return;
-        setBalance(res.zksys ? res.zksys.sys : "—");
+        setBalance(res.rollux ? res.rollux.sys : "—");
       })
       .catch(() => {
         if (active) setBalance("—");
@@ -37,34 +32,26 @@ export function ZkSysPage() {
     return () => { active = false; };
   }, [evmAddress, activeNetwork]);
 
-  const isLive = activeNetwork === "TESTNET";
-
   return (
     <div className="page animate-fade-in">
       <div className="page-header">
-        <h1>zkSYS</h1>
-        <p>The Syscoin zero-knowledge proof layer.</p>
+        <h1>Rollux L2</h1>
+        <p>The Syscoin Optimistic Rollup layer.</p>
       </div>
 
       <div className="card" style={{ maxWidth: 640, marginBottom: "var(--space-6)" }}>
         <div className="flex items-center gap-4" style={{ marginBottom: "var(--space-5)" }}>
-          <span style={{ fontSize: "2rem" }}>⚡</span>
+          <img src="/rollux.svg" alt="Rollux" style={{ width: "32px", height: "32px" }} />
           <div>
-            <div className="font-semibold">zkSYS Chain Environment</div>
-            {isLive ? (
-              <span className="badge badge--success mt-1">Live on Testnet</span>
-            ) : (
-              <span className="badge badge--devnet mt-1">Future — Not yet available on {NETWORK_LABELS[activeNetwork]}</span>
-            )}
+            <div className="font-semibold">Rollux Chain Environment</div>
+            <span className="badge badge--success mt-1">Live on {NETWORK_LABELS[activeNetwork]}</span>
           </div>
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-3)" }}>
           <div style={{ display: "flex", justifyContent: "space-between" }}>
             <span className="text-muted text-xs">Status</span>
-            <span className="text-sm font-semibold text-success">
-              {isLive ? "ONLINE" : "OFFLINE"}
-            </span>
+            <span className="text-sm font-semibold text-success">ONLINE</span>
           </div>
           <div style={{ display: "flex", justifyContent: "space-between" }}>
             <span className="text-muted text-xs">Network</span>
@@ -74,7 +61,7 @@ export function ZkSysPage() {
             <span className="text-muted text-xs">Public Interface</span>
             <span className="text-sm">EVM RPC (ethers.js compatible)</span>
           </div>
-          {isLive && evmAddress && (
+          {evmAddress && (
             <div style={{ display: "flex", justifyContent: "space-between" }}>
               <span className="text-muted text-xs">Wallet Balance</span>
               <span className="text-sm font-mono">
@@ -85,15 +72,8 @@ export function ZkSysPage() {
         </div>
       </div>
 
-      <WarningBox severity="info" title="About zkSYS">
-        zkSYS is Syscoin's zero-knowledge layer, currently available on Testnet. 
-        It supports full EVM compatibility and allows you to sign and execute standard Web3 transactions 
-        directly from your connected EVM address.
-      </WarningBox>
-
-      <WarningBox severity="warn" title="zkSYS Rules" className="mt-4">
-        Transactions on zkSYS use standard EVM accounts but may be subject to different proving wait times 
-        when withdrawing back to Layer 1. Always ensure you have a small amount of SYS to cover gas fees.
+      <WarningBox severity="info" title="About Rollux">
+        Rollux is Syscoin's Optimistic Rollup (L2) designed for high scalability, near-instant transaction speeds, and extremely low fees. It relies on Syscoin's UTXO layer for Proof-of-Data Availability (PoDA) and security.
       </WarningBox>
     </div>
   );

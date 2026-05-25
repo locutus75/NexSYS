@@ -32,6 +32,8 @@ export interface SendIntent {
   sourceUtxoFrozen?: boolean;
   /** Whether the source UTXO is reserved for a Sentry Node. */
   sourceUtxoReservedForNode?: boolean;
+  /** Whether the native Web3 wallet is configured. */
+  isCredentialsSaved?: boolean;
 }
 
 /**
@@ -47,6 +49,7 @@ export function validateSendIntent(intent: SendIntent): SendValidationResult {
     amount,
     sourceUtxoFrozen,
     sourceUtxoReservedForNode,
+    isCredentialsSaved,
   } = intent;
 
   // --- Guard: frozen UTXO ---
@@ -118,23 +121,13 @@ export function validateSendIntent(intent: SendIntent): SendValidationResult {
     };
   }
 
-  // --- NEVM → UTXO: must bridge ---
-  if (
-    (sourceChain === "SYSCOIN_NEVM" || sourceChain === "ROLLUX") &&
-    (addrType === "UTXO_LEGACY" ||
-      addrType === "UTXO_SEGWIT" ||
-      addrType === "UTXO_BECH32" ||
-      addrType === "UTXO_TAPROOT")
-  ) {
+  // --- Native Web3 Wallet check ---
+  if (sourceChain !== "SYSCOIN_NATIVE_UTXO" && !isCredentialsSaved) {
+    const chainName = sourceChain === "ZKSYS" ? "zkSYS" : sourceChain === "ROLLUX" ? "Rollux" : "Syscoin NEVM";
     return {
       action: "BLOCK",
-      reason:
-        `You are trying to send from ${sourceChain === "SYSCOIN_NEVM" ? "Syscoin NEVM" : "Rollux"} ` +
-        "to a Syscoin Native (UTXO) address. " +
-        "These are different environments — a direct send will not arrive safely.",
-      suggestedAction:
-        "Use the Bridge to move SYS back to Syscoin Native (UTXO) first.",
-      detectedAddressType: addrType,
+      reason: `Sending directly from ${chainName} requires your native Web3 wallet to be configured.`,
+      suggestedAction: `Please go to Settings to import your EVM Private Key or Mnemonic phrase.`,
     };
   }
 
@@ -143,10 +136,10 @@ export function validateSendIntent(intent: SendIntent): SendValidationResult {
     return {
       action: "WARN",
       reason:
-        "Sending from zkSYS is subject to zkSYS-specific bridge and proving rules. " +
-        "This environment is new — verify all details on the confirmation screen.",
+        "Sending from zkSYS is subject to zkSYS-specific proving rules. " +
+        "Ensure the destination chain is correct.",
       suggestedAction:
-        "Review the zkSYS status screen before proceeding. Ensure the destination chain is correct.",
+        "Review the zkSYS status screen before proceeding.",
       detectedAddressType: addrType,
     };
   }

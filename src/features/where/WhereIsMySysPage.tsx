@@ -36,6 +36,7 @@ export function WhereIsMySysPage() {
   const [utxoError,     setUtxoError]     = useState<string | null>(null);
   const [nevmBalance,   setNevmBalance]   = useState<string | null>(null);
   const [rolluxBalance, setRolluxBalance] = useState<string | null>(null);
+  const [zksysBalance,  setZksysBalance]  = useState<string | null>(null);
   const [evmLoading,    setEvmLoading]    = useState(false);
   const [evmErrors,     setEvmErrors]     = useState<string[]>([]);
 
@@ -55,9 +56,10 @@ export function WhereIsMySysPage() {
     // EVM
     if (evmAddress) {
       setEvmLoading(true);
-      const { nevm, rollux, errors } = await fetchAllEvmBalances(activeNetwork, evmAddress);
+      const { nevm, rollux, zksys, errors } = await fetchAllEvmBalances(activeNetwork, evmAddress);
       setNevmBalance(nevm?.sys ?? null);
       setRolluxBalance(rollux?.sys ?? null);
+      setZksysBalance(zksys?.sys ?? null);
       setEvmErrors(errors);
       setEvmLoading(false);
     }
@@ -68,7 +70,7 @@ export function WhereIsMySysPage() {
   const isTestnet = activeNetwork !== "MAINNET";
 
   // ── Total (rough sum) ────────────────────────────────────────────────────────
-  const totalSys = [utxoBalance, nevmBalance, rolluxBalance]
+  const totalSys = [utxoBalance, nevmBalance, rolluxBalance, zksysBalance]
     .map(b => parseFloat(b ?? "0"))
     .reduce((a, b) => a + b, 0);
 
@@ -143,15 +145,14 @@ export function WhereIsMySysPage() {
     {
       id: "ZKSYS",
       name: "zkSYS",
-      balance: null,
-      loading: false,
+      balance: zksysBalance,
+      loading: evmLoading && zksysBalance === null && !!evmAddress,
       explanation:
-        "zkSYS is Syscoin's upcoming zero-knowledge proof layer. " +
-        "When public interfaces become available, your zkSYS proving status and balance will appear here. " +
-        "No action is required now.",
-      canDo: [{ label: "Coming soon — zkSYS readiness (MVP 6)" }],
+        "zkSYS is Syscoin's zero-knowledge proof layer. " +
+        "You can view your zkSYS balance here. More features coming soon.",
+      canDo: [{ label: "View zkSYS balance" }],
       cannotDo: [],
-      addressFormat: "TBD",
+      addressFormat: "0x… (same as NEVM)",
     },
   ];
 
@@ -219,9 +220,7 @@ export function WhereIsMySysPage() {
                     <div className="spinner" style={{ width: 14, height: 14 }} />
                     <span className="text-xs text-muted">Loading…</span>
                   </div>
-                ) : chain.id === "ZKSYS" ? (
-                  <span className="badge badge--devnet">Future chain</span>
-                ) : !evmAddress && (chain.id === "SYSCOIN_NEVM" || chain.id === "ROLLUX") ? (
+                ) : !evmAddress && (chain.id === "SYSCOIN_NEVM" || chain.id === "ROLLUX" || chain.id === "ZKSYS") ? (
                   <span className="text-xs text-muted">No 0x address set</span>
                 ) : (
                   <div>
