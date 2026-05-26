@@ -115,7 +115,10 @@ export function NetworkSelectorPage() {
       </WarningBox>
 
       <div className="network-grid">
-        {ENVIRONMENTS.map((env) => {
+        {ENVIRONMENTS.filter((env) => {
+          if (env === "MAINNET" || env === "TESTNET") return true;
+          return localStorage.getItem("nexsys_developer_mode") === "true";
+        }).map((env) => {
           const isActive = env === activeNetwork;
           const variant = env.toLowerCase() as "mainnet" | "testnet" | "regtest" | "devnet";
           return (

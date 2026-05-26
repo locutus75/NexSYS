@@ -59,6 +59,19 @@ export function SettingsPage() {
     return localStorage.getItem("nexsys_bg_logo_type") || "icon";
   });
 
+  const [developerMode, setDeveloperMode] = useState(() => {
+    return localStorage.getItem("nexsys_developer_mode") === "true";
+  });
+
+  const toggleDeveloperMode = (checked: boolean) => {
+    setDeveloperMode(checked);
+    if (checked) {
+      localStorage.setItem("nexsys_developer_mode", "true");
+    } else {
+      localStorage.removeItem("nexsys_developer_mode");
+    }
+  };
+
   const [appVersion, setAppVersion] = useState<string>("0.1.0");
   const [updateStatus, setUpdateStatus] = useState<"idle" | "checking" | "no-update" | "available" | "downloading" | "installing" | "done" | "error">("idle");
   const [updateError, setUpdateError] = useState<string | null>(null);
@@ -723,6 +736,22 @@ export function SettingsPage() {
         </p>
 
         <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-3)" }}>
+          <div className="btn btn-secondary" style={{ width: "100%", padding: "var(--space-4)", textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "default" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "var(--space-3)" }}>
+              <span style={{ fontSize: "1.2rem", width: "24px", textAlign: "center", fontWeight: "bold" }}>⚙️</span>
+              <div>
+                <div className="text-sm font-semibold text-white">Developer Mode</div>
+                <div className="text-xs text-muted" style={{ marginTop: "2px" }}>Show DevNet and RegTest in Network Selector</div>
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              checked={developerMode}
+              onChange={(e) => toggleDeveloperMode(e.target.checked)}
+              style={{ width: "20px", height: "20px", accentColor: "var(--color-accent)", cursor: "pointer" }}
+            />
+          </div>
+
           <Link
             to="/developer-api"
             className="btn btn-secondary"

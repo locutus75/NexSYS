@@ -38,7 +38,7 @@ export function BalanceCard({
   const isTestnet = network !== "MAINNET";
 
   return (
-    <div className={`card card--balance ${isTestnet ? "card--testnet" : ""} ${className}`}>
+    <div className={`card card--balance card--${network.toLowerCase()} ${className}`}>
       <div className="balance-card__header">
         <ChainBadge chain={chain} />
         {isTestnet && (
