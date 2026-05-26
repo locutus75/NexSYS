@@ -3,7 +3,7 @@
  * Interacts with MetaMask and the Syscoin NEVM contracts for the Bridge Claim phase.
  */
 import { BrowserProvider, Contract, sha256, getBytes, JsonRpcProvider, Wallet, parseEther } from "ethers";
-import { EVM_RPC } from "./evmRpcClient";
+import { getEvmRpcEndpoints } from "./evmRpcClient";
 
 // ABI placeholder for the Syscoin Vault Manager to get the trusted relayer
 const SYSCOIN_VAULT_MANAGER_ABI = [
@@ -144,13 +144,14 @@ export async function submitSpvProofToNevm(
   network: string,
   privateKey?: string,
   onStatusUpdate?: (status: string) => void,
-  onBlockUpdate?: (info: string) => void
+  onBlockUpdate?: (info: string) => void,
+  onTxHash?: (hash: string) => void
 ): Promise<string> {
   let signer;
   let provider;
 
   if (privateKey) {
-    const rpcEndpoints = EVM_RPC[network] || EVM_RPC.MAINNET;
+    const rpcEndpoints = getEvmRpcEndpoints(network);
     const rpcUrl = rpcEndpoints.nevm;
     if (!rpcUrl) {
       throw new Error(`No NEVM RPC URL configured for network: ${network}`);
@@ -242,6 +243,7 @@ export async function submitSpvProofToNevm(
       syscoinBlockHeader
     );
 
+    if (onTxHash) onTxHash(tx.hash);
     if (onStatusUpdate) onStatusUpdate("mining");
 
     // Poll for block progress while waiting for confirmation
@@ -306,13 +308,14 @@ export async function depositEthToRollux(
   network: string,
   privateKey?: string,
   onStatusUpdate?: (status: string) => void,
-  onBlockUpdate?: (info: string) => void
+  onBlockUpdate?: (info: string) => void,
+  onTxHash?: (hash: string) => void
 ): Promise<string> {
   let signer;
   let provider;
 
   if (privateKey) {
-    const rpcEndpoints = EVM_RPC[network] || EVM_RPC.MAINNET;
+    const rpcEndpoints = getEvmRpcEndpoints(network);
     const rpcUrl = rpcEndpoints.nevm;
     if (!rpcUrl) {
       throw new Error(`No NEVM RPC URL configured for network: ${network}`);
@@ -343,6 +346,7 @@ export async function depositEthToRollux(
       "0x", // empty _data
       { value: amountWei }
     );
+    if (onTxHash) onTxHash(tx.hash);
     if (onStatusUpdate) onStatusUpdate("mining");
 
     // Poll for block progress while waiting for confirmation

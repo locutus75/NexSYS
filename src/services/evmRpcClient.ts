@@ -15,7 +15,7 @@ export interface EvmBalance {
 
 import { ethers } from "ethers";
 
-export const EVM_RPC: Record<string, { nevm: string; rollux: string; zksys: string }> = {
+export const DEFAULT_EVM_RPC: Record<string, { nevm: string; rollux: string; zksys: string }> = {
   MAINNET: {
     nevm:   "https://rpc.syscoin.org",
     rollux: "https://rpc.rollux.com",
@@ -23,12 +23,31 @@ export const EVM_RPC: Record<string, { nevm: string; rollux: string; zksys: stri
   },
   TESTNET: {
     nevm:   "https://rpc.tanenbaum.io",
-    rollux: "https://rpc-tanenbaum.rollux.com",
+    rollux: "",
     zksys:  "https://rpc-zk.tanenbaum.io/",
   },
   REGTEST:  { nevm: "", rollux: "", zksys: "" },
   DEVNET:   { nevm: "", rollux: "", zksys: "" },
 };
+
+// ── Configuration Getter ────────────────────────────────────────────────────────
+
+export function getEvmRpcEndpoints(network: string): { nevm: string; rollux: string; zksys: string } {
+  const defaults = DEFAULT_EVM_RPC[network] ?? DEFAULT_EVM_RPC.MAINNET;
+  if (typeof window === "undefined" || !window.localStorage) {
+    return defaults;
+  }
+  try {
+    const saved = localStorage.getItem(`nexsys_rpc_config_${network}`);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      return { ...defaults, ...parsed };
+    }
+  } catch (e) {
+    console.error("Failed to parse custom RPC config:", e);
+  }
+  return defaults;
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -93,7 +112,7 @@ export async function fetchAllEvmBalances(
   address: string,
   signal?: AbortSignal
 ): Promise<{ nevm: EvmBalance | null; rollux: EvmBalance | null; zksys: EvmBalance | null; errors: string[] }> {
-  const endpoints = EVM_RPC[network] ?? EVM_RPC.MAINNET;
+  const endpoints = getEvmRpcEndpoints(network);
   const errors: string[] = [];
 
   const [nevmResult, rolluxResult, zksysResult] = await Promise.allSettled([
@@ -120,7 +139,7 @@ export async function sendEvmTransaction(
   amountInSys: string,
   privateKey: string
 ): Promise<string> {
-  const endpoints = EVM_RPC[network] ?? EVM_RPC.MAINNET;
+  const endpoints = getEvmRpcEndpoints(network);
   let rpcUrl = "";
   if (chain === "SYSCOIN_NEVM") rpcUrl = endpoints.nevm;
   else if (chain === "ROLLUX") rpcUrl = endpoints.rollux;

@@ -49,7 +49,35 @@ export function Sidebar() {
     <nav className="sidebar" aria-label="Main navigation">
       {/* Logo / Brand */}
       <div className="sidebar__brand sidebar__brand--banner">
-        <img src="/logo_banner.png" alt="NexSYS Command Center" className="sidebar__brand-banner-img" />
+        <img 
+          src="/logo_banner.png" 
+          alt="NexSYS Command Center" 
+          className="sidebar__brand-banner-img" 
+          style={{ cursor: "pointer", userSelect: "none", WebkitUserSelect: "none" }}
+          onMouseDown={(e) => {
+            if (e.shiftKey) {
+              window.dispatchEvent(new CustomEvent('nexsys:easteregg:config'));
+              return;
+            }
+            const rect = e.currentTarget.getBoundingClientRect();
+            window.dispatchEvent(new CustomEvent('nexsys:easteregg:start', { 
+              detail: { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+            }));
+          }}
+          onMouseUp={() => window.dispatchEvent(new CustomEvent('nexsys:easteregg:stop'))}
+          onMouseLeave={() => window.dispatchEvent(new CustomEvent('nexsys:easteregg:stop'))}
+          onTouchStart={(e) => {
+            if (e.shiftKey) {
+              window.dispatchEvent(new CustomEvent('nexsys:easteregg:config'));
+              return;
+            }
+            const rect = e.currentTarget.getBoundingClientRect();
+            window.dispatchEvent(new CustomEvent('nexsys:easteregg:start', { 
+              detail: { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+            }));
+          }}
+          onTouchEnd={() => window.dispatchEvent(new CustomEvent('nexsys:easteregg:stop'))}
+        />
       </div>
 
       {/* Network badge & Version */}

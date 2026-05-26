@@ -20,6 +20,7 @@ import { SecurityPage }         from "../features/security/SecurityPage";
 import { SentryNodePage }       from "../features/sentry/SentryNodePage";
 import { WhereIsMySysPage }     from "../features/where/WhereIsMySysPage";
 import { BridgePage }           from "../features/bridge/BridgePage";
+import { LightningEasterEgg } from "../components/layout/LightningEasterEgg";
 import { PlaceholderPage }      from "../features/PlaceholderPage";
 import "./App.css";
 
@@ -47,9 +48,36 @@ export function App() {
     };
   }, []);
 
+  // Auto-update check on startup
+  useEffect(() => {
+    const checkUpdateOnStartup = localStorage.getItem("nexsys_auto_update_startup") !== "false";
+    if (!checkUpdateOnStartup) return;
+
+    import("@tauri-apps/api/core").then(({ isTauri }) => {
+      if (isTauri()) {
+        import("@tauri-apps/plugin-updater").then(({ check }) => {
+          check().then(async (update) => {
+            if (update) {
+              console.log("[Auto-Update] Update found:", update.version, "Downloading & installing...");
+              await update.downloadAndInstall();
+              console.log("[Auto-Update] Install complete. Relaunching...");
+              const { relaunch } = await import("@tauri-apps/plugin-process");
+              await relaunch();
+            } else {
+              console.log("[Auto-Update] No updates found.");
+            }
+          }).catch(err => {
+            console.error("[Auto-Update] Check failed:", err);
+          });
+        });
+      }
+    }).catch(() => {});
+  }, []);
+
   return (
     <BrowserRouter>
       <div className="app-shell">
+        <LightningEasterEgg />
         {bgLogoEnabled && (
           <div 
             className={`app-bg-watermark app-bg-watermark--${bgLogoType}`} 

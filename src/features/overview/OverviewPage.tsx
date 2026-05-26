@@ -43,6 +43,10 @@ export function OverviewPage() {
   const [zksysBalance,  setZksysBalance]  = useState<string | null>(null);
   const [evmLoading,    setEvmLoading]    = useState(false);
 
+  // Wallet loading state
+  const [availableWallets, setAvailableWallets] = useState<string[]>([]);
+  const [walletActionLoading, setWalletActionLoading] = useState(false);
+
   const fetchUtxoBalance = useCallback(async (background = false) => {
     if (!background) setUtxoLoading(true);
     setUtxoError(null);
@@ -54,22 +58,53 @@ export function OverviewPage() {
       const msg = result.error?.message ?? "";
       // Common case: no wallet loaded in Syscoin Core
       const noWallet =
-        msg.toLowerCase().includes("wallet") ||
-        msg.toLowerCase().includes("no wallet") ||
         msg.includes("-18") || // RPC_WALLET_NOT_FOUND
+        msg.toLowerCase().includes("requested wallet does not exist") ||
         msg.includes("method not found");
-      if (noWallet) {
-        setUtxoError(
-          `No wallet loaded in Syscoin Core.\n` +
-          `Set a Wallet Name in Settings, or load a wallet in your node with:\n` +
-          `syscoin-cli loadwallet "<name>"`
-        );
+      
+      // Prevent false positives on connection errors containing the URL (e.g. /wallet/xxx)
+      const isConnectionError = msg.toLowerCase().includes("connection error") || msg.toLowerCase().includes("fetch");
+      
+      if (noWallet && !isConnectionError) {
+        setUtxoError(`No wallet loaded or recognized.\nError: ${msg}`);
+        // Fetch available wallets
+        try {
+          const dirRes = await rpcClient.listWalletDir();
+          if (dirRes.ok && dirRes.value.wallets) {
+            setAvailableWallets(dirRes.value.wallets.map(w => w.name));
+          } else {
+            setAvailableWallets([]);
+          }
+        } catch (e) {}
       } else {
         setUtxoError(msg || "Cannot connect to Syscoin Core RPC. Check your settings.");
       }
     }
     if (!background) setUtxoLoading(false);
   }, [rpcClient]);
+
+  const handleLoadWallet = async (name: string) => {
+    setWalletActionLoading(true);
+    const res = await rpcClient.loadWallet(name);
+    setWalletActionLoading(false);
+    if (res.ok) {
+      fetchUtxoBalance(false);
+    } else {
+      setUtxoError(`Failed to load wallet: ${res.error?.message}`);
+    }
+  };
+
+  const handleCreateWallet = async () => {
+    setWalletActionLoading(true);
+    // Create a default wallet named "wallet"
+    const res = await rpcClient.createWallet("wallet", false, false);
+    setWalletActionLoading(false);
+    if (res.ok) {
+      fetchUtxoBalance(false);
+    } else {
+      setUtxoError(`Failed to create wallet: ${res.error?.message}`);
+    }
+  };
 
   const fetchNodeStatus = useCallback(async (background = false) => {
     if (!background) setNodeLoading(true);
@@ -115,11 +150,19 @@ export function OverviewPage() {
 
   const [autoRefreshInterval, setAutoRefreshInterval] = useState<number>(10); // seconds, 0 = off
 
-  // Initial load
+  // Initial load & Event Listeners
   useEffect(() => {
     fetchUtxoBalance(false);
     fetchNodeStatus(false);
     fetchEvmBalances(false);
+
+    const handleRpcConfigUpdate = () => {
+      fetchEvmBalances(false);
+    };
+    window.addEventListener("nexsys_rpc_config_updated", handleRpcConfigUpdate);
+    return () => {
+      window.removeEventListener("nexsys_rpc_config_updated", handleRpcConfigUpdate);
+    };
   }, [fetchUtxoBalance, fetchNodeStatus, fetchEvmBalances]);
 
   // Auto-polling interval
@@ -179,6 +222,31 @@ export function OverviewPage() {
           unconfirmed={utxoUnconfirmed}
           loading={utxoLoading}
           error={utxoError ?? undefined}
+          errorAction={
+            utxoError?.includes("No wallet loaded") ? (
+              <div className="flex gap-2 flex-wrap">
+                {availableWallets.map((w, idx) => (
+                  <button 
+                    key={idx} 
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => handleLoadWallet(w)}
+                    disabled={walletActionLoading}
+                  >
+                    {walletActionLoading ? "Loading…" : `Load ${w || 'Default Wallet'}`}
+                  </button>
+                ))}
+                {availableWallets.length === 0 && (
+                   <button 
+                    className="btn btn-primary btn-sm"
+                    onClick={() => handleCreateWallet()}
+                    disabled={walletActionLoading}
+                  >
+                    {walletActionLoading ? "Creating…" : "Create Default Wallet"}
+                  </button>
+                )}
+              </div>
+            ) : undefined
+          }
           description="Your native UTXO SYS. Spendable directly on Syscoin Native."
         />
         <BalanceCard
@@ -190,21 +258,8 @@ export function OverviewPage() {
             ? "SYS on Syscoin NEVM (EVM-compatible)."
             : "Set your 0x address in Settings to see your NEVM balance."}
         />
-        <BalanceCard
-          chain="ROLLUX"
-          network={activeNetwork}
-          confirmed={rolluxBalance ?? "—"}
-          loading={evmLoading && rolluxBalance === null}
-          description={evmAddress
-            ? "SYS on Rollux Layer 2. Bridged from Syscoin NEVM."
-            : "Set your 0x address in Settings to see your Rollux balance."}
-        />
-      </div>
-
-      {/* Status row */}
-      <div className="grid-3 mb-8">
-        {/* Node status card */}
-        <div className="card">
+        {/* Node status card (Moved to first row) */}
+        <div className={`card card--${activeNetwork.toLowerCase()}`}>
           <div className="card__label stat-label mb-4">Node Status</div>
           {nodeLoading ? (
             <div className="flex items-center gap-2"><div className="spinner" /><span className="text-muted text-sm">Checking node…</span></div>
@@ -239,6 +294,20 @@ export function OverviewPage() {
             Full Node Status →
           </Link>
         </div>
+      </div>
+
+      {/* Status row */}
+      <div className="grid-3 mb-8">
+        {/* Rollux card (Moved to second row) */}
+        <BalanceCard
+          chain="ROLLUX"
+          network={activeNetwork}
+          confirmed={rolluxBalance ?? "—"}
+          loading={evmLoading && rolluxBalance === null}
+          description={evmAddress
+            ? "SYS on Rollux Layer 2. Bridged from Syscoin NEVM."
+            : "Set your 0x address in Settings to see your Rollux balance."}
+        />
 
         {/* zkSYS card */}
         <BalanceCard
@@ -252,7 +321,7 @@ export function OverviewPage() {
         />
 
         {/* Security card */}
-        <div className="card">
+        <div className={`card card--${activeNetwork.toLowerCase()}`}>
           <div className="stat-label mb-4">Security & Backup</div>
           <div className="flex flex-col gap-2">
             <div className="overview-stat">

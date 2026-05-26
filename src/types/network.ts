@@ -64,5 +64,13 @@ export const EVM_PUBLIC_RPCS = {
   SYSCOIN_NEVM_MAINNET: "https://rpc.syscoin.org",
   SYSCOIN_NEVM_TESTNET: "https://rpc.tanenbaum.io",
   ROLLUX_MAINNET: "https://rpc.rollux.com",
-  ROLLUX_TESTNET: "https://rpc-tanenbaum.rollux.com",
+  ROLLUX_TESTNET: "",
+} as const;
+
+/** EVM Blockscout Explorer APIs for transaction history */
+export const EVM_EXPLORERS = {
+  SYSCOIN_NEVM_MAINNET: "https://explorer.syscoin.org/api",
+  SYSCOIN_NEVM_TESTNET: "https://explorer.tanenbaum.io/api",
+  ROLLUX_MAINNET: "https://explorer.rollux.com/api",
+  ROLLUX_TESTNET: "https://rollux.tanenbaum.io/api",
 } as const;

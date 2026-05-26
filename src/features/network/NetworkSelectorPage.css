@@ -29,9 +29,22 @@
   opacity: 1;
 }
 
-.network-card--active {
-  border-color: var(--color-accent);
-  box-shadow: var(--shadow-accent);
+/* Active states per network */
+.network-card--active.network-card--mainnet {
+  border-color: var(--badge-mainnet-text);
+  box-shadow: 0 0 0 1px var(--badge-mainnet-text);
+}
+.network-card--active.network-card--testnet {
+  border-color: var(--badge-testnet-text);
+  box-shadow: 0 0 0 1px var(--badge-testnet-text);
+}
+.network-card--active.network-card--regtest {
+  border-color: var(--badge-regtest-text);
+  box-shadow: 0 0 0 1px var(--badge-regtest-text);
+}
+.network-card--active.network-card--devnet {
+  border-color: var(--badge-devnet-text);
+  box-shadow: 0 0 0 1px var(--badge-devnet-text);
 }
 
 .network-card__badge {
@@ -49,6 +62,10 @@
 .network-card__active-label {
   margin-top: var(--space-3);
   font-size: var(--text-xs);
-  color: var(--color-accent);
   font-weight: var(--font-semibold);
 }
+
+.network-card--mainnet .network-card__active-label { color: var(--badge-mainnet-text); }
+.network-card--testnet .network-card__active-label { color: var(--badge-testnet-text); }
+.network-card--regtest .network-card__active-label { color: var(--badge-regtest-text); }
+.network-card--devnet .network-card__active-label { color: var(--badge-devnet-text); }

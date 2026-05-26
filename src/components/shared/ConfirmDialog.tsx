@@ -59,7 +59,15 @@ export function ConfirmDialog({
   if (!open) return null;
 
   return (
-    <div className="dialog-overlay" onClick={cancelDisabled ? undefined : onCancel} role="presentation">
+    <div 
+      className="dialog-overlay" 
+      onPointerDown={(e) => {
+        if (e.target === e.currentTarget && !cancelDisabled) {
+          onCancel();
+        }
+      }} 
+      role="presentation"
+    >
       <div
         className="dialog"
         ref={dialogRef}

@@ -11,7 +11,7 @@ import type { NetworkEnvironment } from "../types/chain";
 import BN from "bn.js";
 
 const MAINNET_BLOCKBOOK = "https://blockbook.syscoin.org";
-const TESTNET_BLOCKBOOK = "https://blockbook-testnet.syscoin.org";
+const TESTNET_BLOCKBOOK = "https://blockbook.tanenbaum.io";
 
 /**
  * Fetch UTXOs for an address.
@@ -245,8 +245,43 @@ export async function fetchSpvProof(
   network: "MAINNET" | "TESTNET",
   txid: string
 ): Promise<any> {
+  let nodeError = "Unknown node error";
+
+  // First, try the node RPC directly as it is much more reliable and doesn't rely on 3rd party indexers.
+  try {
+    const rpcRes = await _rpcClient.call("syscoingetspvproof", [txid]);
+    if (rpcRes.ok && rpcRes.value) {
+      let proof = rpcRes.value;
+      if (typeof proof === "string") {
+        proof = JSON.parse(proof);
+      }
+      
+      const blockRes = await _rpcClient.call("getblock", [proof.blockhash]);
+      if (blockRes.ok && blockRes.value) {
+        const blockNumber = blockRes.value.height;
+        return {
+          blockNumber: Number(blockNumber),
+          transaction: proof.transaction,
+          index: proof.index,
+          siblings: proof.siblings,
+          header: proof.header,
+          nevm_blockhash: proof.nevm_blockhash,
+          chainlock: proof.chainlock
+        };
+      } else {
+        nodeError = `getblock failed: ${blockRes.error?.message || blockRes.error}`;
+        console.warn("Node SPV proof getblock failed:", blockRes.error);
+      }
+    } else {
+      nodeError = `syscoingetspvproof failed: ${rpcRes.error?.message || rpcRes.error}`;
+      console.warn("Node SPV proof syscoingetspvproof failed:", rpcRes.error);
+    }
+  } catch (err: any) {
+    nodeError = err.message || String(err);
+    console.warn("Node SPV proof fetch failed, falling back to Blockbook...", err);
+  }
+
   // If the node RPC failed, we use the Blockbook API response.
-  // The Syscoin NEVM Relayer contract requires the raw data components, not an RLP string.
   try {
     const blockbookUrl = network === "MAINNET" ? MAINNET_BLOCKBOOK : TESTNET_BLOCKBOOK;
     const isBrowserDev = typeof window !== "undefined" && !(window as any).__TAURI__;
@@ -282,21 +317,21 @@ export async function fetchSpvProof(
     const blockRes = await fetch(blockUrl);
     const blockData = await blockRes.json();
     
-    const blockNumber = blockData?.height || blockData?.block?.height;
-    if (blockNumber === undefined) {
-      throw new Error("Could not retrieve block height for the SPV proof.");
-    }
+      const blockNumber = blockData?.height || blockData?.block?.height;
+      if (blockNumber === undefined) {
+        throw new Error("Could not retrieve block height for the SPV proof.");
+      }
 
-    return {
-      blockNumber: Number(blockNumber),
-      transaction: proof.transaction,
-      index: proof.index,
-      siblings: proof.siblings,
-      header: proof.header,
-      nevm_blockhash: proof.nevm_blockhash,
-      chainlock: proof.chainlock
-    };
-  } catch (err: any) {
-    throw new Error(`Failed to retrieve SPV proof from Blockbook: ${err.message}`);
-  }
+      return {
+        blockNumber: Number(blockNumber),
+        transaction: proof.transaction,
+        index: proof.index,
+        siblings: proof.siblings,
+        header: proof.header,
+        nevm_blockhash: proof.nevm_blockhash,
+        chainlock: proof.chainlock
+      };
+    } catch (err: any) {
+      throw new Error(`Local Node Error: ${nodeError}. Fallback Blockbook Error: ${err.message}`);
+    }
 }

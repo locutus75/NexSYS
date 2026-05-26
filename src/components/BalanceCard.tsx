@@ -15,6 +15,8 @@ interface Props {
   locked?: string;
   loading?: boolean;
   error?: string;
+  /** Action node to render below an error message, e.g. a button */
+  errorAction?: React.ReactNode;
   /** Description shown below the amount, explaining what this chain is. */
   description?: string;
   className?: string;
@@ -29,6 +31,7 @@ export function BalanceCard({
   locked,
   loading,
   error,
+  errorAction,
   description,
   className = "",
 }: Props) {
@@ -58,6 +61,7 @@ export function BalanceCard({
                 {line}
               </span>
             ))}
+            {errorAction && <div className="mt-3">{errorAction}</div>}
           </div>
         ) : (
           <>

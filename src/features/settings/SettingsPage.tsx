@@ -7,6 +7,7 @@ import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { Wallet } from "ethers";
 import { WarningBox } from "../../components/shared/WarningBox";
+import { NetworkBadge } from "../../components/layout/NetworkBadge";
 import { useNetworkStore } from "../../store/networkStore";
 import type { RpcConfig } from "../../types/network";
 import { validatePassword } from "../../services/cryptoService";
@@ -62,6 +63,9 @@ export function SettingsPage() {
   const [updateStatus, setUpdateStatus] = useState<"idle" | "checking" | "no-update" | "available" | "downloading" | "installing" | "done" | "error">("idle");
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [updateManifest, setUpdateManifest] = useState<any>(null);
+  const [checkUpdateOnStartup, setCheckUpdateOnStartup] = useState(() => {
+    return localStorage.getItem("nexsys_auto_update_startup") !== "false";
+  });
 
   useEffect(() => {
     import("@tauri-apps/api/core").then(({ isTauri }) => {
@@ -163,8 +167,10 @@ export function SettingsPage() {
         <p>Configure your Syscoin Core RPC connection. Supports local and remote nodes.</p>
       </div>
 
-      <div className="card" style={{ maxWidth: 560 }}>
-        <div className="stat-label mb-6">RPC Connection — {activeNetwork}</div>
+      <div className={`card card--${activeNetwork.toLowerCase()}`} style={{ maxWidth: 560 }}>
+        <div className="stat-label mb-6" style={{ display: "flex", alignItems: "center", gap: "var(--space-2)" }}>
+          RPC CONNECTION — <NetworkBadge />
+        </div>
 
         {inTauri === false && (
           <WarningBox severity="warn" title="Browser mode detected" className="mb-4">
@@ -260,8 +266,10 @@ export function SettingsPage() {
       </div>
 
       {/* EVM address/credentials card */}
-      <div className="card mt-6" style={{ maxWidth: 560 }}>
-        <div className="stat-label mb-4">NEVM / Rollux Credentials ({activeNetwork})</div>
+      <div className={`card card--${activeNetwork.toLowerCase()} mt-6`} style={{ maxWidth: 560 }}>
+        <div className="stat-label mb-4" style={{ display: "flex", alignItems: "center", gap: "var(--space-2)" }}>
+          NEVM / ROLLUX CREDENTIALS — <NetworkBadge />
+        </div>
         
         <WarningBox severity="info" className="mb-5">
           Your credentials are encrypted using AES-GCM 256-bit and stored locally.
@@ -625,6 +633,22 @@ export function SettingsPage() {
               <span className="badge" style={{ backgroundColor: "var(--color-bg-tertiary)", color: "var(--color-accent)", padding: "2px 8px", borderRadius: "4px", fontSize: "0.85rem", fontWeight: "bold" }}>
                 v{appVersion}
               </span>
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: "var(--space-3)" }}>
+              <input
+                id="update-startup-toggle"
+                type="checkbox"
+                checked={checkUpdateOnStartup}
+                onChange={(e) => {
+                  const val = e.target.checked;
+                  setCheckUpdateOnStartup(val);
+                  localStorage.setItem("nexsys_auto_update_startup", val.toString());
+                }}
+              />
+              <label htmlFor="update-startup-toggle" className="text-sm text-secondary cursor-pointer">
+                Check and install updates automatically on startup
+              </label>
             </div>
 
             {updateStatus === "checking" && (

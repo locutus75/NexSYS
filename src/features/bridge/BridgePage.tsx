@@ -399,9 +399,14 @@ export function BridgePage() {
               await burnAction();
             } catch (err: any) {
               console.error("Auto-burn after conversion failed:", err);
+              const errMsg = err.message || "";
+              let statusMsg = "Auto-burn failed: " + errMsg;
+              if (errMsg.toLowerCase().includes("walletpassphrase")) {
+                statusMsg = "Wallet locked. Click 'Resume Action' to enter your password and continue the bridge.";
+              }
               updateBridgeRecord(activeNetwork, rec.id, {
                 status: "failed",
-                statusMessage: "Auto-burn failed: " + err.message
+                statusMessage: statusMsg
               });
             }
           } else {
@@ -659,7 +664,7 @@ export function BridgePage() {
 
   const resolveTxDetails = async (txid: string): Promise<{ amount: string }> => {
     const MAINNET_BLOCKBOOK = "https://blockbook.syscoin.org";
-    const TESTNET_BLOCKBOOK = "https://blockbook-testnet.syscoin.org";
+    const TESTNET_BLOCKBOOK = "https://blockbook.tanenbaum.io";
     try {
       // 1. Try local wallet gettransaction
       const txRes = await rpcClient.call<any>("gettransaction", [txid]);
@@ -736,6 +741,8 @@ export function BridgePage() {
     setClaimingId(pendingClaimRecord.id);
     const rec = pendingClaimRecord;
 
+    let modalClosed = false;
+
     try {
       // 1. Decrypt private key
       setClaimStep("decrypting");
@@ -750,29 +757,48 @@ export function BridgePage() {
         proof,
         activeNetwork,
         decryptedPrivKey,
-        (step) => setClaimStep(step),
-        (info) => setClaimBlockInfo(info)
+        (step) => { if (!modalClosed) setClaimStep(step); },
+        (info) => { if (!modalClosed) setClaimBlockInfo(info); },
+        (hash) => {
+          modalClosed = true;
+          updateBridgeRecord(activeNetwork, rec.id, {
+            status: "waiting_bridge",
+            statusMessage: `Claiming on NEVM (TX: ${hash.slice(0, 10)}...)`
+          });
+          refreshHistory();
+          
+          setPassDialogOpen(false);
+          setPassDialogPassword("");
+          setPendingClaimRecord(null);
+          setClaimStep(null);
+          setClaimBlockInfo(null);
+          setClaimingId(null);
+        }
       );
-      setClaimBlockInfo(null); // clear after relayTx confirms
 
       if (rec.destChain === "ROLLUX") {
         // 4. Deposit minted NEVM SYS into Rollux L2
         updateBridgeRecord(activeNetwork, rec.id, {
           status: "released",
-          statusMessage: `SYS geclaimd op NEVM (TX: ${evmTxHash.slice(0, 10)}...). Storten op Rollux L2...`
+          statusMessage: `SYS geclaimd op NEVM. Storten op Rollux L2...`
         });
         refreshHistory();
 
-        setClaimStep("depositing_rollux");
         const l2TxHash = await depositEthToRollux(
           rec.amount,
           rec.destAddress,
           activeNetwork,
           decryptedPrivKey,
-          (step) => setClaimStep(step === "broadcasting" ? "depositing_rollux" : step === "mining" ? "mining_rollux" : step),
-          (info) => setClaimBlockInfo(info)
+          undefined,
+          undefined,
+          (hash) => {
+             updateBridgeRecord(activeNetwork, rec.id, {
+               status: "waiting_bridge",
+               statusMessage: `Storten op Rollux L2 (TX: ${hash.slice(0, 10)}...)`
+             });
+             refreshHistory();
+          }
         );
-        setClaimBlockInfo(null); // clear after deposit confirms
         updateBridgeRecord(activeNetwork, rec.id, {
           status: "completed",
           statusMessage: `Gestort op Rollux L2 (TX: ${l2TxHash.slice(0, 10)}...)`
@@ -785,22 +811,25 @@ export function BridgePage() {
       }
       refreshHistory();
 
-      // Clean up
-      setPassDialogOpen(false);
-      setPassDialogPassword("");
-      setPendingClaimRecord(null);
-      setClaimStep(null);
-      setClaimBlockInfo(null);
     } catch (err: any) {
       console.error("In-app claim failed:", err);
-      setClaimStep(null);
-      if (err.message && (err.message.includes("decryption") || err.message.includes("Padding") || err.message.includes("mac") || err.message.includes("bad decrypt"))) {
-        setPassDialogError("Incorrect master password. Decryption failed.");
+      if (modalClosed) {
+        // Modal is closed, show error in the history record
+        updateBridgeRecord(activeNetwork, rec.id, {
+           status: "failed",
+           statusMessage: "Claim mislukt: " + (err.message || String(err))
+        });
+        refreshHistory();
       } else {
-        setPassDialogError(err.message || String(err));
+        // Modal is open, show error there
+        setClaimStep(null);
+        if (err.message && (err.message.includes("decryption") || err.message.includes("Padding") || err.message.includes("mac") || err.message.includes("bad decrypt"))) {
+          setPassDialogError("Incorrect master password. Decryption failed.");
+        } else {
+          setPassDialogError(err.message || String(err));
+        }
+        setClaimingId(null);
       }
-    } finally {
-      setClaimingId(null);
     }
   }
 
@@ -1101,6 +1130,10 @@ export function BridgePage() {
                 onClick={() => {
                   if (route.source === "SYSCOIN_NATIVE_UTXO" && walletInfo && walletInfo.unlocked_until === 0) {
                     setUnlockError("Unlock your Syscoin UTXO Node Wallet to continue bridging.");
+                    setPendingBridgeAfterUnlock(() => async () => {
+                      setConfirmOpen(true);
+                    });
+                    setPendingBridgeLabel(`Resume bridge: ${amount || "0"} SYS to ${route.destLabel}`);
                     setUnlockDialogOpen(true);
                     return;
                   }
@@ -1366,7 +1399,12 @@ export function BridgePage() {
                         <div className="bridge-actions-cell">
                           {rec.status === "waiting_bridge" && !rec.isConversion && (
                             <div className="flex flex-col gap-1 items-stretch" style={{ minWidth: "150px" }}>
-                              {isCredentialsSaved ? (
+                              {rec.statusMessage?.includes("Claiming on NEVM") || rec.statusMessage?.includes("Storten op Rollux L2") ? (
+                                <div className="text-xs text-accent flex items-center justify-center gap-2 font-semibold bg-accent/10 py-1.5 px-2 rounded" style={{ backgroundColor: "rgba(var(--color-accent-rgb), 0.1)" }}>
+                                  <div className="spinner" style={{ width: 12, height: 12, borderWidth: 2 }} />
+                                  Processing...
+                                </div>
+                              ) : isCredentialsSaved ? (
                                 <>
                                   <button
                                     className="btn btn-primary btn-sm"

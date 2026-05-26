@@ -250,6 +250,17 @@ code, pre {
   border-color: var(--color-accent);
   box-shadow: var(--shadow-accent);
 }
+.card--mainnet { border-color: var(--badge-mainnet-border); }
+.card--mainnet:hover { border-color: var(--badge-mainnet-border); box-shadow: 0 0 16px var(--badge-mainnet-bg); }
+
+.card--testnet { border-color: var(--badge-testnet-border); }
+.card--testnet:hover { border-color: var(--badge-testnet-border); box-shadow: 0 0 16px var(--badge-testnet-bg); }
+
+.card--regtest { border-color: var(--badge-regtest-border); }
+.card--regtest:hover { border-color: var(--badge-regtest-border); box-shadow: 0 0 16px var(--badge-regtest-bg); }
+
+.card--devnet  { border-color: var(--badge-devnet-border); }
+.card--devnet:hover { border-color: var(--badge-devnet-border); box-shadow: 0 0 16px var(--badge-devnet-bg); }
 
 /* ============================================================
    BUTTONS

@@ -126,7 +126,11 @@ async function rpcCall<T>(
 
       if (!resp.ok) {
         console.warn("[RPC] Rust returned error:", resp.error);
-        return { ok: false, error: new RpcError(resp.error ?? "Unknown RPC error", -1) };
+        const errMsg = resp.error ?? "Unknown RPC error";
+        if (errMsg.startsWith("Connection error") || errMsg.startsWith("HTTP client build") || errMsg.startsWith("JSON parse error")) {
+          return { ok: false, error: new RpcConnectionError(config.host, config.port, new Error(errMsg)) };
+        }
+        return { ok: false, error: new RpcError(errMsg, -1) };
       }
       return { ok: true, value: resp.result as T };
     } catch (err) {
@@ -383,8 +387,27 @@ export class SyscoinRpcClient {
     return rpcCall<RawWalletInfo>(this.config, "getwalletinfo");
   }
 
-  getBalances(): Promise<RpcResult<RawBalances>> {
-    return rpcCall<RawBalances>(this.config, "getbalances");
+  async getBalances(): Promise<RpcResult<RawBalances>> {
+    const res = await rpcCall<RawBalances>(this.config, "getbalances");
+    if (!res.ok && res.error && (res.error as RpcError).code === -32601) {
+      // "Method not found" (-32601) - older Syscoin nodes might not support getbalances.
+      // Fallback to getwalletinfo which provides the same balances.
+      const infoRes = await this.getWalletInfo();
+      if (infoRes.ok) {
+        return {
+          ok: true,
+          value: {
+            mine: {
+              trusted: infoRes.value.balance,
+              untrusted_pending: infoRes.value.unconfirmed_balance,
+              immature: infoRes.value.immature_balance,
+            }
+          }
+        };
+      }
+      return infoRes as unknown as RpcResult<RawBalances>;
+    }
+    return res;
   }
 
   getMempoolInfo(): Promise<RpcResult<RawMempoolInfo>> {
@@ -608,5 +631,27 @@ export class SyscoinRpcClient {
    */
   convertAddress(address: string): Promise<RpcResult<{ v1address: string; eth_address: string }>> {
     return rpcCall(this.config, "convertaddress", [address]);
+  }
+
+  // ── Wallet Management ───────────────────────────────────────────────────────
+
+  listWallets(): Promise<RpcResult<string[]>> {
+    return rpcCall<string[]>(this.config, "listwallets");
+  }
+
+  listWalletDir(): Promise<RpcResult<{ wallets: { name: string }[] }>> {
+    return rpcCall<{ wallets: { name: string }[] }>(this.config, "listwalletdir");
+  }
+
+  loadWallet(walletName: string): Promise<RpcResult<{ name: string; warning: string }>> {
+    return rpcCall<{ name: string; warning: string }>(this.config, "loadwallet", [walletName]);
+  }
+
+  createWallet(walletName: string, disablePrivateKeys = false, blank = false): Promise<RpcResult<{ name: string; warning: string }>> {
+    return rpcCall<{ name: string; warning: string }>(this.config, "createwallet", [
+      walletName,
+      disablePrivateKeys,
+      blank
+    ]);
   }
 }
