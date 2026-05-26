@@ -12,6 +12,8 @@ export function LightningConfigModal() {
     spawnDelayBase,
     soundEnabled,
     soundVolume,
+    soundPitch,
+    soundCrackle,
     updateParam,
     resetDefaults
   } = useEasterEggStore();
@@ -55,17 +57,45 @@ export function LightningConfigModal() {
             </div>
             
             {soundEnabled && (
-              <div className="lightning-config-slider-container">
-                <div className="lightning-config-slider-header">
-                  <span>Volume</span>
-                  <span>{Math.round(soundVolume * 100)}%</span>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                <div className="lightning-config-slider-container">
+                  <div className="lightning-config-slider-header">
+                    <span>Master Volume</span>
+                    <span>{Math.round(soundVolume * 100)}%</span>
+                  </div>
+                  <input 
+                    type="range" min="0" max="1" step="0.05"
+                    value={soundVolume}
+                    onChange={(e) => updateParam('soundVolume', parseFloat(e.target.value))}
+                    className="lightning-config-slider"
+                  />
                 </div>
-                <input 
-                  type="range" min="0" max="1" step="0.05"
-                  value={soundVolume}
-                  onChange={(e) => updateParam('soundVolume', parseFloat(e.target.value))}
-                  className="lightning-config-slider"
-                />
+                
+                <div className="lightning-config-slider-container">
+                  <div className="lightning-config-slider-header">
+                    <span>Thunder Pitch</span>
+                    <span>{soundPitch} Hz</span>
+                  </div>
+                  <input 
+                    type="range" min="20" max="100" step="5"
+                    value={soundPitch}
+                    onChange={(e) => updateParam('soundPitch', parseInt(e.target.value))}
+                    className="lightning-config-slider"
+                  />
+                </div>
+
+                <div className="lightning-config-slider-container">
+                  <div className="lightning-config-slider-header">
+                    <span>Crackle Intensity</span>
+                    <span>{Math.round(soundCrackle * 100)}%</span>
+                  </div>
+                  <input 
+                    type="range" min="0" max="2" step="0.1"
+                    value={soundCrackle}
+                    onChange={(e) => updateParam('soundCrackle', parseFloat(e.target.value))}
+                    className="lightning-config-slider"
+                  />
+                </div>
               </div>
             )}
           </div>

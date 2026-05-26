@@ -10,6 +10,8 @@ export interface EasterEggState {
   spawnDelayBase: number;
   soundEnabled: boolean;
   soundVolume: number;
+  soundPitch: number;
+  soundCrackle: number;
   
   setConfigOpen: (open: boolean) => void;
   updateParam: (param: keyof EasterEggState, value: number | boolean) => void;
@@ -24,6 +26,8 @@ const DEFAULTS = {
   spawnDelayBase: 400,
   soundEnabled: true,
   soundVolume: 0.5,
+  soundPitch: 40,
+  soundCrackle: 0.8,
 };
 
 export const useEasterEggStore = create<EasterEggState>()(
@@ -51,6 +55,8 @@ export const useEasterEggStore = create<EasterEggState>()(
         spawnDelayBase: state.spawnDelayBase,
         soundEnabled: state.soundEnabled,
         soundVolume: state.soundVolume,
+        soundPitch: state.soundPitch,
+        soundCrackle: state.soundCrackle,
       }),
     }
   )

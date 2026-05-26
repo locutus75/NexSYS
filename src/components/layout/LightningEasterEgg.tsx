@@ -42,19 +42,23 @@ export function LightningEasterEgg() {
     spawnDelayBase,
     soundEnabled,
     soundVolume,
+    soundPitch,
+    soundCrackle,
     setConfigOpen
   } = useEasterEggStore();
 
   // Keep a ref to the latest params for the animation loop
-  const paramsRef = useRef({ jitter, baseLength, maxDepthBase, branchProbBase, spawnDelayBase, soundEnabled, soundVolume });
+  const paramsRef = useRef({ jitter, baseLength, maxDepthBase, branchProbBase, spawnDelayBase, soundEnabled, soundVolume, soundPitch, soundCrackle });
   useEffect(() => {
-    paramsRef.current = { jitter, baseLength, maxDepthBase, branchProbBase, spawnDelayBase, soundEnabled, soundVolume };
+    paramsRef.current = { jitter, baseLength, maxDepthBase, branchProbBase, spawnDelayBase, soundEnabled, soundVolume, soundPitch, soundCrackle };
     if (soundEnabled) {
       soundEngine.setVolume(soundVolume);
+      soundEngine.pitch = soundPitch;
+      soundEngine.crackle = soundCrackle;
     } else {
       soundEngine.stop();
     }
-  }, [jitter, baseLength, maxDepthBase, branchProbBase, spawnDelayBase, soundEnabled, soundVolume]);
+  }, [jitter, baseLength, maxDepthBase, branchProbBase, spawnDelayBase, soundEnabled, soundVolume, soundPitch, soundCrackle]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
