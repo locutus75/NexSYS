@@ -21,6 +21,7 @@ import { SentryNodePage }       from "../features/sentry/SentryNodePage";
 import { WhereIsMySysPage }     from "../features/where/WhereIsMySysPage";
 import { BridgePage }           from "../features/bridge/BridgePage";
 import { LightningEasterEgg } from "../components/layout/LightningEasterEgg";
+import { UpdatePromptModal } from "../components/layout/UpdatePromptModal";
 import { PlaceholderPage }      from "../features/PlaceholderPage";
 import "./App.css";
 
@@ -48,6 +49,8 @@ export function App() {
     };
   }, []);
 
+  const [availableUpdate, setAvailableUpdate] = useState<any>(null);
+
   // Auto-update check on startup
   useEffect(() => {
     const checkUpdateOnStartup = localStorage.getItem("nexsys_auto_update_startup") !== "false";
@@ -56,13 +59,15 @@ export function App() {
     import("@tauri-apps/api/core").then(({ isTauri }) => {
       if (isTauri()) {
         import("@tauri-apps/plugin-updater").then(({ check }) => {
-          check().then(async (update) => {
+          check().then((update) => {
             if (update) {
-              console.log("[Auto-Update] Update found:", update.version, "Downloading & installing...");
-              await update.downloadAndInstall();
-              console.log("[Auto-Update] Install complete. Relaunching...");
-              const { relaunch } = await import("@tauri-apps/plugin-process");
-              await relaunch();
+              const skippedVersion = localStorage.getItem("nexsys_skipped_update_version");
+              if (skippedVersion === update.version) {
+                console.log(`[Auto-Update] Update ${update.version} available, but user skipped it.`);
+              } else {
+                console.log("[Auto-Update] Update found:", update.version, "Prompting user...");
+                setAvailableUpdate(update);
+              }
             } else {
               console.log("[Auto-Update] No updates found.");
             }
@@ -73,6 +78,15 @@ export function App() {
       }
     }).catch(() => {});
   }, []);
+
+  const handleInstallUpdate = async () => {
+    if (!availableUpdate) return;
+    console.log("[Auto-Update] Downloading & installing...");
+    await availableUpdate.downloadAndInstall();
+    console.log("[Auto-Update] Install complete. Relaunching...");
+    const { relaunch } = await import("@tauri-apps/plugin-process");
+    await relaunch();
+  };
 
   return (
     <BrowserRouter>
@@ -128,6 +142,11 @@ export function App() {
             } />
           </Routes>
         </main>
+        <UpdatePromptModal 
+          update={availableUpdate} 
+          onClose={() => setAvailableUpdate(null)} 
+          onInstall={handleInstallUpdate} 
+        />
       </div>
     </BrowserRouter>
   );
