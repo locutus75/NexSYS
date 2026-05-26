@@ -14,6 +14,7 @@ export interface EvmBalance {
 // ── Public RPC endpoints ──────────────────────────────────────────────────────
 
 import { ethers } from "ethers";
+import { isTauri } from "@tauri-apps/api/core";
 
 export const DEFAULT_EVM_RPC: Record<string, { nevm: string; rollux: string; zksys: string }> = {
   MAINNET: {
@@ -86,8 +87,8 @@ export async function fetchEvmBalance(
   });
 
   let fetchUrl = rpcUrl;
-  const isBrowserDev = typeof window !== "undefined" && !(window as any).__TAURI__;
-  if (isBrowserDev) {
+  const inTauri = typeof window !== "undefined" && isTauri();
+  if (!inTauri) {
     fetchUrl = `${window.location.origin}/rpc-proxy?target=${encodeURIComponent(rpcUrl)}`;
   }
 
