@@ -34,6 +34,7 @@ describe("validateSendIntent", () => {
     const result = validateSendIntent(makeIntent({
       sourceChain: "SYSCOIN_NEVM",
       destinationAddress: EVM_ADDRESS,
+      isCredentialsSaved: true,
     }));
     expect(result.action).toBe("ALLOW");
   });
@@ -52,6 +53,7 @@ describe("validateSendIntent", () => {
     const result = validateSendIntent(makeIntent({
       sourceChain: "SYSCOIN_NEVM",
       destinationAddress: UTXO_ADDRESS,
+      isCredentialsSaved: true,
     }));
     expect(result.action).toBe("BLOCK");
     expect(result.suggestedAction).toMatch(/bridge/i);
@@ -61,6 +63,7 @@ describe("validateSendIntent", () => {
     const result = validateSendIntent(makeIntent({
       sourceChain: "ROLLUX",
       destinationAddress: UTXO_ADDRESS,
+      isCredentialsSaved: true,
     }));
     expect(result.action).toBe("BLOCK");
   });
@@ -97,6 +100,7 @@ describe("validateSendIntent", () => {
     const result = validateSendIntent(makeIntent({
       sourceChain: "ZKSYS",
       destinationAddress: EVM_ADDRESS,
+      isCredentialsSaved: true,
     }));
     expect(result.action).toBe("WARN");
     expect(result.reason).toMatch(/zkSYS/i);

@@ -81,18 +81,10 @@ const ROUTES: BridgeRoute[] = [
     dest: "SYSCOIN_NATIVE_UTXO",
     sourceLabel: "Syscoin NEVM",
     destLabel: "Syscoin Native (UTXO)",
-    native: false,
+    native: true,
     estimatedTime: "~5–15 minutes (EVM + UTXO confirmation)",
     feeNote: "Syscoin NEVM gas fee (paid in SYS/ETH)",
-    externalUrl: "https://bridge.syscoin.org",
-    externalName: "Syscoin Bridge Portal",
-    steps: [
-      "Connect your EVM wallet (Pali or MetaMask) to bridge.syscoin.org",
-      "Select NEVM → UTXO and enter your native sys1… address",
-      "Approve the contract call in your wallet",
-      "Wait for bridge processing and UTXO confirmation",
-    ],
-    warning: "Requires an EVM-compatible wallet such as Pali Wallet or MetaMask with the Syscoin NEVM network added.",
+    warning: "Requires an EVM-compatible wallet such as Pali Wallet or MetaMask connected to the Syscoin NEVM network.",
   },
   {
     id: "nevm_rollux",
@@ -191,11 +183,11 @@ export function BridgePage() {
   const [copiedTxid, setCopiedTxid] = useState<string | null>(null);
   const [claimError, setClaimError] = useState<string | null>(null);
 
-  // Password Prompt Modal State
   const [passDialogOpen, setPassDialogOpen] = useState(false);
   const [passDialogPassword, setPassDialogPassword] = useState("");
   const [passDialogError, setPassDialogError] = useState<string | null>(null);
   const [pendingClaimRecord, setPendingClaimRecord] = useState<BridgeRecord | null>(null);
+  const [pendingEvmBurn, setPendingEvmBurn] = useState<{ recordId: string, amount: number, dest: string } | null>(null);
   const [claimStep, setClaimStep] = useState<string | null>(null);
   const [claimBlockInfo, setClaimBlockInfo] = useState<string | null>(null);
 
@@ -221,10 +213,22 @@ export function BridgePage() {
   }, [activeNetwork]);
 
   const fetchBalance = useCallback(async () => {
-    if (route.source !== "SYSCOIN_NATIVE_UTXO") return;
-    const res = await rpcClient.getBalances();
-    if (res.ok) setSpendable(res.value.mine.trusted);
-  }, [rpcClient, route.source]);
+    if (route.source === "SYSCOIN_NATIVE_UTXO") {
+      const res = await rpcClient.getBalances();
+      if (res.ok) setSpendable(res.value.mine.trusted);
+    } else if (route.source === "SYSCOIN_NEVM") {
+      if (!evmAddress) {
+        setSpendable(0);
+        return;
+      }
+      import("../../services/evmRpcClient").then(({ fetchEvmBalance, getEvmRpcEndpoints }) => {
+        const endpoints = getEvmRpcEndpoints(activeNetwork);
+        if (endpoints.nevm) {
+          fetchEvmBalance(endpoints.nevm, evmAddress).then(b => setSpendable(parseFloat(b.sys))).catch(() => setSpendable(0));
+        }
+      });
+    }
+  }, [rpcClient, route.source, evmAddress, activeNetwork]);
 
   const fetchFee = useCallback(async () => {
     if (route.source !== "SYSCOIN_NATIVE_UTXO") return;
@@ -235,7 +239,8 @@ export function BridgePage() {
   }, [rpcClient, route.source]);
 
   const fetchWalletAddresses = useCallback(async () => {
-    if (route.source !== "SYSCOIN_NATIVE_UTXO") return;
+    // We fetch UTXO addresses even if route.source is not UTXO, so we can pre-fill destination address
+
     
     // Fetch UTXOs and Received Addresses
     const utxoRes = await rpcClient.listUnspent(0, 9999999, []);
@@ -307,6 +312,24 @@ export function BridgePage() {
       });
     });
 
+    return opts;
+  }, [walletAddresses]);
+
+  const destDropdownOptions = useMemo<CustomDropdownOption[]>(() => {
+    const opts: CustomDropdownOption[] = [];
+    (walletAddresses as any[]).forEach(a => {
+      let amountStr = `${a.balance.toFixed(4)} SYS`;
+      if (a.lockedBalance && a.lockedBalance > 0) {
+        amountStr += ` (🔒 ${a.lockedBalance.toFixed(4)})`;
+      }
+      opts.push({
+        value: a.address,
+        label: `${a.address.slice(0, 12)}…${a.address.slice(-8)}`,
+        subtitle: a.address,
+        amount: amountStr,
+        badge: a.label || undefined,
+      });
+    });
     return opts;
   }, [walletAddresses]);
 
@@ -418,8 +441,53 @@ export function BridgePage() {
           refreshHistory();
         }
       }
+
+      // Check NEVM -> UTXO SPV proofs
+      const waitingSpv = history.filter(r => r.status === "waiting_spv" && r.txid && r.sourceChain === "SYSCOIN_NEVM");
+      for (const rec of waitingSpv) {
+        if (!rec.txid) continue;
+        
+        try {
+          // 1. Fetch EVM confirmations
+          const { JsonRpcProvider } = await import("ethers");
+          const { getEvmRpcEndpoints } = await import("../../services/evmRpcClient");
+          const endpoints = getEvmRpcEndpoints(activeNetwork as "MAINNET" | "TESTNET");
+          
+          if (endpoints.nevm) {
+            const provider = new JsonRpcProvider(endpoints.nevm);
+            const receipt = await provider.getTransactionReceipt(rec.txid);
+            if (receipt) {
+              const confs = await receipt.confirmations();
+              const requiredConfs = 60; // Estimated 60 blocks (~2.5 uur) for SPV proof finality
+              
+              updateBridgeRecord(activeNetwork, rec.id, {
+                statusMessage: `Waiting for SPV Proof (${Math.min(confs, requiredConfs)}/${requiredConfs} confirmations)`
+              });
+              refreshHistory();
+              
+              // Only try to claim if we have enough confirmations, to reduce spam
+              if (confs < requiredConfs) {
+                continue; // Skip SPV claim attempt
+              }
+            }
+          }
+
+          // 2. Try to fetch and submit SPV proof
+          const { claimNevmToUtxoMint } = await import("../../services/bridgeService");
+          const utxoTxid = await claimNevmToUtxoMint(rpcClient, activeNetwork, rec.txid, rec.destAddress);
+          
+          updateBridgeRecord(activeNetwork, rec.id, {
+            status: "completed",
+            statusMessage: `Success! UTXO mint txid: ${utxoTxid}`
+          });
+          refreshHistory();
+        } catch (err: any) {
+          // It throws an error if SPV proof is not ready yet or other issues.
+          console.debug(`SPV proof for ${rec.txid} not ready yet or error:`, err);
+        }
+      }
     };
-    const interval = setInterval(checkConfirmations, 15000); // Check every 15s
+    const interval = setInterval(checkConfirmations, 120000); // Check every 2m
     return () => clearInterval(interval);
   }, [history, rpcClient, activeNetwork, refreshHistory]);
 
@@ -432,6 +500,8 @@ export function BridgePage() {
     // Reset dest address to saved EVM address when switching to UTXO→NEVM
     if (route.dest === "SYSCOIN_NEVM" || route.dest === "ROLLUX") {
       setDestAddress(evmAddress);
+    } else if (route.dest === "SYSCOIN_NATIVE_UTXO" && walletAddresses.length > 0) {
+      setDestAddress(walletAddresses[0].address);
     } else {
       setDestAddress("");
     }
@@ -494,24 +564,48 @@ export function BridgePage() {
     refreshHistory();
 
     try {
-      const txidRaw = await executeUtxoToNevmBridge(
-        rpcClient,
-        activeNetwork,
-        capturedSource, // can be empty to let wallet pick
-        capturedAmount,
-        capturedDest
-      );
+      if (route.id === "utxo_nevm" || route.id === "utxo_rollux") {
+        const txidRaw = await executeUtxoToNevmBridge(
+          rpcClient,
+          activeNetwork,
+          capturedSource, // can be empty to let wallet pick
+          capturedAmount,
+          capturedDest
+        );
 
-      const isConv = txidRaw.startsWith("conversion:");
-      const txid = isConv ? txidRaw.substring("conversion:".length) : txidRaw;
+        const isConv = txidRaw.startsWith("conversion:");
+        const txid = isConv ? txidRaw.substring("conversion:".length) : txidRaw;
 
-      setLastTxid(txid);
-      updateBridgeRecord(activeNetwork, recordId, {
-        txid,
-        status: "confirming_source",
-        isConversion: isConv,
-        statusMessage: isConv ? "Confirming SYS → SYSX conversion..." : "Confirming burn..."
-      });
+        setLastTxid(txid);
+        updateBridgeRecord(activeNetwork, recordId, {
+          txid,
+          status: "confirming_source",
+          isConversion: isConv,
+          statusMessage: isConv ? "Confirming SYS → SYSX conversion..." : "Confirming burn..."
+        });
+      } else if (route.id === "nevm_utxo") {
+        if (isCredentialsSaved) {
+          // Internal wallet: open password prompt to decrypt private key
+          setPendingEvmBurn({ recordId, amount: capturedAmount, dest: capturedDest });
+          setPassDialogOpen(true);
+          return; // Wait for password to proceed in handlePasswordSubmit
+        } else {
+          // External wallet
+          if (!(window as any).ethereum) {
+            throw new Error("Geen Web3 wallet gevonden (MetaMask / Pali). Ga naar Settings om je private key op te slaan.");
+          }
+          const { executeNevmToUtxoBurn } = await import("../../services/evmBridgeService");
+          const txid = await executeNevmToUtxoBurn(capturedAmount, capturedDest, activeNetwork as "MAINNET" | "TESTNET");
+          
+          setLastTxid(txid);
+          updateBridgeRecord(activeNetwork, recordId, {
+            txid,
+            status: "waiting_spv",
+            statusMessage: "Burn transaction confirmed. Waiting for SPV proof..."
+          });
+        }
+      }
+
       refreshHistory();
       setAmount("");
       setChecks({});
@@ -736,101 +830,161 @@ export function BridgePage() {
   };
 
   async function handlePasswordSubmit() {
-    if (!pendingClaimRecord || !passDialogPassword) return;
+    if (!passDialogPassword) return;
+    if (!pendingClaimRecord && !pendingEvmBurn) return;
     setPassDialogError(null);
-    setClaimingId(pendingClaimRecord.id);
-    const rec = pendingClaimRecord;
-
-    let modalClosed = false;
-
-    try {
-      // 1. Decrypt private key
-      setClaimStep("decrypting");
-      const decryptedPrivKey = await decryptPrivateKey(passDialogPassword);
-
-      // 2. Fetch proof
-      setClaimStep("fetching_proof");
-      const proof = await fetchSpvProof(rpcClient, activeNetwork as "MAINNET" | "TESTNET", rec.txid!);
-
-      // 3. Submit proof (relayTx)
-      const evmTxHash = await submitSpvProofToNevm(
-        proof,
-        activeNetwork,
-        decryptedPrivKey,
-        (step) => { if (!modalClosed) setClaimStep(step); },
-        (info) => { if (!modalClosed) setClaimBlockInfo(info); },
-        (hash) => {
-          modalClosed = true;
-          updateBridgeRecord(activeNetwork, rec.id, {
-            status: "waiting_bridge",
-            statusMessage: `Claiming on NEVM (TX: ${hash.slice(0, 10)}...)`
-          });
-          refreshHistory();
-          
-          setPassDialogOpen(false);
-          setPassDialogPassword("");
-          setPendingClaimRecord(null);
-          setClaimStep(null);
-          setClaimBlockInfo(null);
-          setClaimingId(null);
-        }
-      );
-
-      if (rec.destChain === "ROLLUX") {
-        // 4. Deposit minted NEVM SYS into Rollux L2
-        updateBridgeRecord(activeNetwork, rec.id, {
-          status: "released",
-          statusMessage: `SYS geclaimd op NEVM. Storten op Rollux L2...`
-        });
-        refreshHistory();
-
-        const l2TxHash = await depositEthToRollux(
-          rec.amount,
-          rec.destAddress,
-          activeNetwork,
-          decryptedPrivKey,
-          undefined,
-          undefined,
-          (hash) => {
-             updateBridgeRecord(activeNetwork, rec.id, {
-               status: "waiting_bridge",
-               statusMessage: `Storten op Rollux L2 (TX: ${hash.slice(0, 10)}...)`
-             });
-             refreshHistory();
-          }
-        );
-        updateBridgeRecord(activeNetwork, rec.id, {
-          status: "completed",
-          statusMessage: `Gestort op Rollux L2 (TX: ${l2TxHash.slice(0, 10)}...)`
-        });
-      } else {
-        updateBridgeRecord(activeNetwork, rec.id, {
-          status: "completed",
-          statusMessage: `Geclaimd op NEVM (TX: ${evmTxHash.slice(0, 10)}...)`
-        });
-      }
+    
+    if (pendingEvmBurn) {
+      const rec = pendingEvmBurn;
+      const pwd = passDialogPassword;
+      
+      setPassDialogOpen(false);
+      setPassDialogPassword("");
+      setPendingEvmBurn(null);
+      setAmount("");
+      setChecks({});
+      
+      updateBridgeRecord(activeNetwork, rec.recordId, {
+        status: "confirming_source",
+        statusMessage: "Decrypting key..."
+      });
       refreshHistory();
 
-    } catch (err: any) {
-      console.error("In-app claim failed:", err);
-      if (modalClosed) {
-        // Modal is closed, show error in the history record
+      // Run async
+      (async () => {
+        try {
+          const decryptedPrivKey = await decryptPrivateKey(pwd);
+          
+          updateBridgeRecord(activeNetwork, rec.recordId, {
+            status: "confirming_source",
+            statusMessage: "Broadcasting burn to NEVM..."
+          });
+          refreshHistory();
+
+          const { executeNevmToUtxoBurn } = await import("../../services/evmBridgeService");
+          const txid = await executeNevmToUtxoBurn(
+            rec.amount,
+            rec.dest,
+            activeNetwork as "MAINNET" | "TESTNET",
+            decryptedPrivKey
+          );
+          
+          setLastTxid(txid);
+          updateBridgeRecord(activeNetwork, rec.recordId, {
+            txid,
+            status: "waiting_spv",
+            statusMessage: "Burn transaction confirmed. Waiting for SPV proof..."
+          });
+          refreshHistory();
+        } catch (err: any) {
+          console.error("handlePasswordSubmit error (burn):", err);
+          updateBridgeRecord(activeNetwork, rec.recordId, {
+            status: "failed",
+            statusMessage: "Failed to execute burn: " + err.message
+          });
+          refreshHistory();
+        }
+      })();
+      return;
+    }
+
+    // Must be a pending claim record
+    const rec = pendingClaimRecord!;
+    const pwd = passDialogPassword;
+    
+    setPassDialogOpen(false);
+    setPassDialogPassword("");
+    setPendingClaimRecord(null);
+    
+    updateBridgeRecord(activeNetwork, rec.id, {
+      status: "waiting_bridge",
+      statusMessage: "Decrypting key..."
+    });
+    refreshHistory();
+
+    (async () => {
+      try {
+        const decryptedPrivKey = await decryptPrivateKey(pwd);
+
         updateBridgeRecord(activeNetwork, rec.id, {
-           status: "failed",
-           statusMessage: "Claim mislukt: " + (err.message || String(err))
+          status: "waiting_bridge",
+          statusMessage: "Fetching SPV proof..."
         });
         refreshHistory();
-      } else {
-        // Modal is open, show error there
-        setClaimStep(null);
-        if (err.message && (err.message.includes("decryption") || err.message.includes("Padding") || err.message.includes("mac") || err.message.includes("bad decrypt"))) {
-          setPassDialogError("Incorrect master password. Decryption failed.");
+
+        const proof = await fetchSpvProof(rpcClient, activeNetwork as "MAINNET" | "TESTNET", rec.txid!);
+
+        updateBridgeRecord(activeNetwork, rec.id, {
+          status: "waiting_bridge",
+          statusMessage: "Broadcasting SPV proof to NEVM..."
+        });
+        refreshHistory();
+
+        const evmTxHash = await submitSpvProofToNevm(
+          proof,
+          activeNetwork,
+          decryptedPrivKey,
+          (step) => {
+            updateBridgeRecord(activeNetwork, rec.id, {
+              status: "waiting_bridge",
+              statusMessage: `Claiming on NEVM: ${step}...`
+            });
+            refreshHistory();
+          },
+          () => { /* ignored for history log to reduce spam */ },
+          (hash) => {
+            updateBridgeRecord(activeNetwork, rec.id, {
+              status: "waiting_bridge",
+              statusMessage: `Claiming on NEVM (TX: ${hash.slice(0, 10)}...)`
+            });
+            refreshHistory();
+          }
+        );
+
+        if (rec.destChain === "ROLLUX") {
+          updateBridgeRecord(activeNetwork, rec.id, {
+            status: "released",
+            statusMessage: `SYS claimed on NEVM. Depositing to Rollux L2...`
+          });
+          refreshHistory();
+
+          const { depositEthToRollux } = await import("../../services/evmBridgeService");
+          const l2TxHash = await depositEthToRollux(
+            rec.amount,
+            rec.destAddress,
+            activeNetwork,
+            decryptedPrivKey,
+            undefined,
+            undefined,
+            (hash) => {
+               updateBridgeRecord(activeNetwork, rec.id, {
+                 status: "waiting_bridge",
+                 statusMessage: `Depositing to Rollux L2 (TX: ${hash.slice(0, 10)}...)`
+               });
+               refreshHistory();
+            }
+          );
+          updateBridgeRecord(activeNetwork, rec.id, {
+            status: "completed",
+            statusMessage: `Bridge completed on Rollux L2 (L1 TX: ${evmTxHash.slice(0,10)}..., L2 TX: ${l2TxHash.slice(0,10)}...)`
+          });
+          refreshHistory();
         } else {
-          setPassDialogError(err.message || String(err));
+          updateBridgeRecord(activeNetwork, rec.id, {
+            status: "completed",
+            statusMessage: `Bridge completed on Syscoin NEVM (TX: ${evmTxHash.slice(0, 10)}...)`
+          });
+          refreshHistory();
         }
-        setClaimingId(null);
+      } catch (err: any) {
+        console.error("Claiming error:", err);
+        updateBridgeRecord(activeNetwork, rec.id, {
+          status: "failed",
+          statusMessage: "Claim failed: " + (err.message || String(err))
+        });
+        refreshHistory();
       }
-    }
+    })();
   }
 
   // ── Validation ────────────────────────────────────────────────────────────
@@ -982,17 +1136,37 @@ export function BridgePage() {
               )}
 
               {/* Source address */}
-              <CustomDropdown
-                label="Source Address (Optional)"
-                value={sourceAddress || "auto"}
-                options={sourceDropdownOptions}
-                onChange={(val) => setSourceAddress(val === "auto" ? "" : val)}
-              />
+              {route.source === "SYSCOIN_NATIVE_UTXO" ? (
+                <>
+                  <CustomDropdown
+                    label="Source Address (Optional)"
+                    value={sourceAddress || "auto"}
+                    options={sourceDropdownOptions}
+                    onChange={(val) => setSourceAddress(val === "auto" ? "" : val)}
+                  />
 
-              {isSourceLocked && (
-                <WarningBox severity="danger" title="Address Locked" className="mt-2 mb-4">
-                  This address is currently locked in Coin Control and has no spendable balance. Please unlock it in Coin Control if you wish to use its funds.
-                </WarningBox>
+                  {isSourceLocked && (
+                    <WarningBox severity="danger" title="Address Locked" className="mt-2 mb-4">
+                      This address is currently locked in Coin Control and has no spendable balance. Please unlock it in Coin Control if you wish to use its funds.
+                    </WarningBox>
+                  )}
+                </>
+              ) : (
+                <div className="form-group mb-4">
+                  <label className="form-label">Source Address (Web3 Wallet)</label>
+                  <div className="flex flex-col mt-2">
+                    <input
+                      className="input input-mono opacity-75"
+                      value={evmAddress || "Connected Web3 Wallet"}
+                      disabled
+                    />
+                    {evmAddress && spendable !== null && (
+                      <span className="form-hint mt-1 opacity-75 text-right">
+                        Balance: {spendable.toFixed(4)} SYS
+                      </span>
+                    )}
+                  </div>
+                </div>
               )}
 
               {/* Amount */}
@@ -1013,7 +1187,7 @@ export function BridgePage() {
                       className="btn btn-ghost btn-sm"
                       id="bridge-max-btn"
                       onClick={() => {
-                        const fee = feeEst ?? 0.0001;
+                        const fee = feeEst ?? (route.source === "SYSCOIN_NEVM" ? 0.005 : 0.0001);
                         setAmount(Math.max(0, spendable - fee).toFixed(8));
                       }}
                     >
@@ -1034,15 +1208,26 @@ export function BridgePage() {
                 <label className="form-label" htmlFor="bridge-dest">
                   Destination Address ({route.dest === "SYSCOIN_NATIVE_UTXO" ? "sys1…" : "0x…"})
                 </label>
-                <input
-                  id="bridge-dest"
-                  className="input input-mono mt-2"
-                  placeholder={route.dest === "SYSCOIN_NATIVE_UTXO" ? "sys1q…" : "0x…"}
-                  value={destAddress}
-                  onChange={e => setDestAddress(e.target.value)}
-                  autoComplete="off"
-                  spellCheck={false}
-                />
+                {route.dest === "SYSCOIN_NATIVE_UTXO" ? (
+                  <div className="mt-2">
+                    <CustomDropdown
+                      label=""
+                      value={destAddress}
+                      options={destDropdownOptions}
+                      onChange={(val) => setDestAddress(val)}
+                    />
+                  </div>
+                ) : (
+                  <input
+                    id="bridge-dest"
+                    className="input input-mono mt-2"
+                    placeholder="0x…"
+                    value={destAddress}
+                    onChange={e => setDestAddress(e.target.value)}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                )}
                 {!evmAddress && (route.dest === "SYSCOIN_NEVM" || route.dest === "ROLLUX") && (
                   <span className="form-hint">
                     Save your 0x address in{" "}
@@ -1453,6 +1638,42 @@ export function BridgePage() {
                               </button>
                             </div>
                           )}
+
+                          {rec.status === "waiting_spv" && (
+                            <div className="flex flex-col gap-1 items-stretch" style={{ minWidth: "150px" }}>
+                              <button
+                                className="btn btn-secondary btn-sm"
+                                style={{ fontSize: "0.7rem", padding: "4px 8px", width: "100%" }}
+                                onClick={() => {
+                                  updateBridgeRecord(activeNetwork, rec.id, {
+                                    status: "stopped_polling",
+                                    statusMessage: "Polling cancelled. You can resume later."
+                                  });
+                                  refreshHistory();
+                                }}
+                              >
+                                Stop Polling
+                              </button>
+                            </div>
+                          )}
+
+                          {rec.status === "stopped_polling" && (
+                            <div className="flex flex-col gap-1 items-stretch" style={{ minWidth: "150px" }}>
+                              <button
+                                className="btn btn-primary btn-sm"
+                                style={{ fontSize: "0.7rem", padding: "4px 8px", width: "100%" }}
+                                onClick={() => {
+                                  updateBridgeRecord(activeNetwork, rec.id, {
+                                    status: "waiting_spv",
+                                    statusMessage: "Resuming SPV polling..."
+                                  });
+                                  refreshHistory();
+                                }}
+                              >
+                                Resume Polling
+                              </button>
+                            </div>
+                          )}
                           <button
                             className="btn btn-ghost btn-sm"
                             style={{ fontSize: "0.7rem", padding: "2px 6px" }}
@@ -1565,9 +1786,16 @@ export function BridgePage() {
           // ── INPUT MODE: show password form ────────────────────────────────
           return (
             <div>
+              {pendingClaimRecord ? (
+                <p className="text-sm text-muted mb-4">
+                  Enter your <strong>EVM Master Password</strong> to decrypt your saved EVM credentials and sign the claim transaction on the NEVM/Rollux chain.
+                </p>
+              ) : pendingEvmBurn ? (
+                <p className="text-sm text-muted mb-4">
+                  Enter your <strong>EVM Master Password</strong> to decrypt your saved EVM credentials and sign the burn transaction on the NEVM/Rollux chain.
+                </p>
+              ) : null}
               <p className="mb-4" style={{ fontSize: "0.85rem", color: "var(--color-text-secondary)" }}>
-                Enter your <strong>EVM Master Password</strong> to decrypt your saved EVM credentials and sign the claim transaction on the NEVM/Rollux chain.
-                <br /><br />
                 <span className="text-accent" style={{ fontWeight: 500 }}>💡 Note: This is the in-app password you set in Settings, <em>not</em> the Syscoin UTXO Node Passphrase.</span>
               </p>
               <input
@@ -1604,6 +1832,7 @@ export function BridgePage() {
           setPassDialogPassword("");
           setPassDialogError(null);
           setPendingClaimRecord(null);
+          setPendingEvmBurn(null);
           setClaimStep(null);
           setClaimBlockInfo(null);
         }}

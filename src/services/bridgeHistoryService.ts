@@ -14,6 +14,8 @@ export type BridgeStatus =
   | "submitted"
   | "confirming_source"
   | "waiting_bridge"
+  | "waiting_spv"
+  | "stopped_polling"
   | "released"
   | "completed"
   | "failed"
@@ -42,6 +44,8 @@ export const BRIDGE_STATUS_LABELS: Record<BridgeStatus, string> = {
   submitted:        "Submitted",
   confirming_source:"Confirming (source chain)",
   waiting_bridge:   "Waiting for Bridge",
+  waiting_spv:      "In progress...",
+  stopped_polling:  "Polling Stopped",
   released:         "Released on Destination",
   completed:        "Completed ✓",
   failed:           "Failed",
@@ -54,6 +58,8 @@ export const BRIDGE_STATUS_COLOR: Record<BridgeStatus, string> = {
   submitted:        "warn",
   confirming_source:"warn",
   waiting_bridge:   "warn",
+  waiting_spv:      "warn",
+  stopped_polling:  "muted",
   released:         "success",
   completed:        "success",
   failed:           "danger",

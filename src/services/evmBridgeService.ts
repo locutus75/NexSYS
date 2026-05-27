@@ -20,6 +20,17 @@ const L1_STANDARD_BRIDGE_ABI = [
   "function depositETHTo(address _to, uint32 _l2Gas, bytes calldata _data) external payable"
 ];
 
+// ABI for the SyscoinERC20Manager (NEVM to UTXO burn)
+export const SYSCOIN_ERC20_MANAGER_ABI = [
+  "function freezeBurn(uint256 value, address assetAddr, uint256 tokenId, string syscoinAddr) external payable returns (bool)"
+];
+
+// SyscoinERC20Manager addresses on Syscoin NEVM
+export const SYSCOIN_ERC20_MANAGER_ADDRESS: Record<string, string> = {
+  MAINNET: "0x6100c8e9d564f045c742c38865611f71193484cf",
+  TESTNET: "0x6100c8e9d564f045c742c38865611f71193484cf", // TODO: Update with correct Tanenbaum address if different
+};
+
 // L1StandardBridgeProxy addresses on Syscoin NEVM
 // Source: https://github.com/SYS-Labs/rollux/tree/develop/packages/contracts-bedrock/deployments
 const L1_STANDARD_BRIDGE_ADDRESS: Record<string, string> = {
@@ -380,5 +391,49 @@ export async function depositEthToRollux(
       );
     }
     throw new Error(`Failed to deposit ETH to Rollux: ${error.message}`);
+  }
+}
+
+/**
+ * Execute NEVM -> UTXO Burn via SyscoinERC20Manager
+ */
+export async function executeNevmToUtxoBurn(
+  amountSys: number,
+  utxoAddress: string,
+  network: "MAINNET" | "TESTNET",
+  privateKey?: string
+): Promise<string> {
+  let signer;
+  if (privateKey) {
+    const endpoints = getEvmRpcEndpoints(network);
+    if (!endpoints.nevm) throw new Error(`No NEVM RPC endpoint found for ${network}`);
+    const provider = new JsonRpcProvider(endpoints.nevm);
+    signer = new Wallet(privateKey, provider);
+  } else {
+    if (!(window as any).ethereum) throw new Error("Geen Web3 wallet gevonden (MetaMask / Pali).");
+    const provider = new BrowserProvider((window as any).ethereum);
+    await provider.send("eth_requestAccounts", []);
+    signer = await provider.getSigner();
+  }
+
+  const managerAddr = SYSCOIN_ERC20_MANAGER_ADDRESS[network];
+  if (!managerAddr) throw new Error(`Geen SyscoinERC20Manager adres gevonden voor netwerk ${network}`);
+
+  const contract = new Contract(managerAddr, SYSCOIN_ERC20_MANAGER_ABI, signer);
+  const amountWei = parseEther(amountSys.toString());
+  
+  // freezeBurn(uint256 value, address assetAddr, uint256 tokenId, string syscoinAddr)
+  // assetAddr is 0x0...0 for native SYS
+  // tokenId is 0 for native SYS
+  const assetAddr = "0x0000000000000000000000000000000000000000";
+  const tokenId = 0;
+
+  try {
+    const tx = await contract.freezeBurn(amountWei, assetAddr, tokenId, utxoAddress, { value: amountWei });
+    const receipt = await tx.wait();
+    return receipt.hash;
+  } catch (err: any) {
+    console.error("executeNevmToUtxoBurn Error:", err);
+    throw new Error(`Failed to execute NEVM -> UTXO burn: ${err.message}`);
   }
 }

@@ -121,6 +121,22 @@ export function validateSendIntent(intent: SendIntent): SendValidationResult {
     };
   }
 
+  // --- EVM → UTXO: must bridge ---
+  if (
+    (sourceChain === "SYSCOIN_NEVM" || sourceChain === "ROLLUX" || sourceChain === "ZKSYS") &&
+    addrType.startsWith("UTXO_")
+  ) {
+    return {
+      action: "BLOCK",
+      reason:
+        `You are trying to send from ${sourceChain} to a Syscoin Native (UTXO) address. ` +
+        "These are different chain environments — a direct send will not arrive safely.",
+      suggestedAction:
+        "Use the Bridge to move SYS to Syscoin Native first.",
+      detectedAddressType: addrType,
+    };
+  }
+
   // --- Native Web3 Wallet check ---
   if (sourceChain !== "SYSCOIN_NATIVE_UTXO" && !isCredentialsSaved) {
     const chainName = sourceChain === "ZKSYS" ? "zkSYS" : sourceChain === "ROLLUX" ? "Rollux" : "Syscoin NEVM";
