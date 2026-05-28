@@ -96,3 +96,18 @@
   border: 1px dashed var(--color-border);
   border-radius: var(--radius-lg);
 }
+
+.wims-input-container {
+  position: relative;
+  flex-grow: 1;
+}
+
+.wims-max-btn {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 28px;
+  min-height: 28px;
+  padding: 0 var(--space-2);
+}

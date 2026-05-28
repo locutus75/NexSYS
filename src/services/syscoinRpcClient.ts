@@ -353,6 +353,52 @@ export interface RawMasternodeCount {
   qualify?: number;
 }
 
+/** Detail from `masternode list json` */
+export interface RawMasternodeListItem {
+  address: string;
+  payee: string;
+  status: string;
+  protocol: number;
+  daemonversion: string;
+  sentinelversion: string;
+  sentinelstate: string;
+  lastseen: number;
+  activeseconds: number;
+  lastpaidtime: number;
+  lastpaidblock: number;
+  owneraddress: string;
+  votingaddress: string;
+  collateraladdress: string;
+  pubkeyoperator: string;
+}
+
+export type RawMasternodeList = Record<string, RawMasternodeListItem>;
+
+/** Detail from `protx list` */
+export interface RawProTxListItem {
+  proTxHash: string;
+  collateralHash: string;
+  collateralIndex: number;
+  type: number;
+  mode: number;
+  state: {
+    service: string;
+    registeredHeight: number;
+    lastPaidHeight: number;
+    nextPaymentHeight: number;
+    PoSePenalty: number;
+    PoSeRevivedHeight: number;
+    PoSeBanHeight: number;
+    revocationReason: number;
+    ownerAddress: string;
+    votingAddress: string;
+    payoutAddress: string;
+    pubKeyOperator: string;
+  };
+}
+
+export type RawProTxList = RawProTxListItem[];
+
 // -----------------------------------------------------------------------
 // Public client class
 // -----------------------------------------------------------------------
@@ -574,17 +620,27 @@ export class SyscoinRpcClient {
 
   /** Status of the local masternode/sentry node. */
   masternodeStatus(): Promise<RpcResult<RawMasternodeStatus>> {
-    return rpcCall<RawMasternodeStatus>(this.config, "masternode", ["status"]);
+    return rpcCall<RawMasternodeStatus>(this.config, "masternode_status");
   }
 
   /** Masternode sync status from the local node. */
   mnSyncStatus(): Promise<RpcResult<RawMnSyncStatus>> {
-    return rpcCall<RawMnSyncStatus>(this.config, "mnsync", ["status"]);
+    return rpcCall<RawMnSyncStatus>(this.config, "mnsync", ["status"]); // mnsync might still use parameter
   }
 
   /** Network-wide masternode / sentry node counts. */
   masternodeCount(): Promise<RpcResult<RawMasternodeCount>> {
-    return rpcCall<RawMasternodeCount>(this.config, "masternode", ["count"]);
+    return rpcCall<RawMasternodeCount>(this.config, "masternode_count");
+  }
+
+  /** Network-wide list of masternodes. */
+  masternodeList(mode: string = "json"): Promise<RpcResult<RawMasternodeList>> {
+    return rpcCall<RawMasternodeList>(this.config, "masternode_list", [mode]);
+  }
+
+  /** List ProTx (Sentry Nodes), default to the local wallet and full details. */
+  protxList(mode: string = "wallet", detailed: boolean = true): Promise<RpcResult<RawProTxList>> {
+    return rpcCall<RawProTxList>(this.config, "protx_list", [mode, detailed]);
   }
 
   /**

@@ -13,17 +13,24 @@
  *   ✓ Version (getnetworkinfo)
  */
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { WarningBox } from "../../components/shared/WarningBox";
 import { useNetworkStore } from "../../store/networkStore";
 import type {
-  RawMasternodeStatus,
-  RawMnSyncStatus,
-  RawMasternodeCount,
   RawBlockchainInfo,
   RawNetworkInfo,
   RawWalletInfoFull,
+  RawMasternodeStatus,
+  RawMnSyncStatus,
+  RawMasternodeCount,
+  RawMasternodeList,
+  RawProTxList,
 } from "../../services/syscoinRpcClient";
+import { StatusPieChart } from "../../components/charts/StatusPieChart";
+import { CustomDropdown } from "../../components/shared/CustomDropdown";
+import { UptimeHistogram } from "../../components/charts/UptimeHistogram";
+import { HistoricalLineChart } from "../../components/charts/HistoricalLineChart";
+import { getHistoricalStats, recordSentryStats, type HistoricalStat } from "../../services/sentryStatsService";
 import "./SentryNodePage.css";
 
 // ── Known port definitions per network ──────────────────────────────────────
@@ -114,6 +121,15 @@ export function SentryNodePage() {
   const [mnSync,  setMnSync]  = useState<RawMnSyncStatus       | null>(null);
   const [mnCount, setMnCount] = useState<RawMasternodeCount    | null>(null);
   const [ports,   setPorts]   = useState<PortResult[]>([]);
+  
+  // Dashboard state
+  const [activeTab, setActiveTab] = useState<"overview" | "mynodes" | "network">("overview");
+  const [myNodes, setMyNodes] = useState<RawProTxList | null>(null);
+  const [mnList, setMnList] = useState<RawMasternodeList | null>(null);
+
+  // New chart states
+  const [chartView, setChartView] = useState<"health" | "uptime" | "history">("health");
+  const [histStats, setHistStats] = useState<HistoricalStat[]>(getHistoricalStats());
 
   // Loading / error flags
   const [loading, setLoading] = useState(true);
@@ -140,7 +156,7 @@ export function SentryNodePage() {
     const errs: string[] = [];
 
     // ── Parallel RPC fetches ────────────────────────────────────────────────
-    const [chainRes, netRes, walletRes, mnStatusRes, mnSyncRes, mnCountRes] =
+    const [chainRes, netRes, walletRes, mnStatusRes, mnSyncRes, mnCountRes, protxRes, mnListRes] =
       await Promise.all([
         rpcClient.getBlockchainInfo(),
         rpcClient.getNetworkInfo(),
@@ -148,6 +164,8 @@ export function SentryNodePage() {
         rpcClient.masternodeStatus(),
         rpcClient.mnSyncStatus(),
         rpcClient.masternodeCount(),
+        rpcClient.protxList("wallet", true),
+        rpcClient.masternodeList("json"),
       ]);
 
     if (chainRes.ok)    setChain(chainRes.value);
@@ -158,15 +176,43 @@ export function SentryNodePage() {
 
     if (walletRes.ok)   setWallet(walletRes.value);
     else setWallet(null);
-
     if (mnStatusRes.ok) setMnStatus(mnStatusRes.value);
-    else setMnStatus(null);
+    else {
+      setMnStatus(null);
+      // Suppress "Method not found" for status if the node isn't configured as a masternode
+      if (!mnStatusRes.error.message.includes("Method not found")) {
+         errs.push(`Masternode status: ${mnStatusRes.error.message}`);
+      }
+    }
 
     if (mnSyncRes.ok)   setMnSync(mnSyncRes.value);
-    else setMnSync(null);
+    else {
+      setMnSync(null);
+      if (!mnSyncRes.error.message.includes("Method not found")) {
+        errs.push(`Masternode sync: ${mnSyncRes.error.message}`);
+      }
+    }
 
-    if (mnCountRes.ok)  setMnCount(mnCountRes.value);
-    else setMnCount(null);
+    if (mnCountRes.ok) {
+      setMnCount(mnCountRes.value);
+      const updatedStats = recordSentryStats(mnCountRes.value.total, mnCountRes.value.enabled);
+      setHistStats(updatedStats);
+    } else {
+      setMnCount(null);
+      errs.push(`Masternode count: ${mnCountRes.error.message}`);
+    }
+
+    if (protxRes.ok) setMyNodes(protxRes.value);
+    else {
+      setMyNodes([]);
+      errs.push(`ProTx list: ${protxRes.error.message}`);
+    }
+
+    if (mnListRes.ok) setMnList(mnListRes.value);
+    else {
+      setMnList(null);
+      errs.push(`Masternode list: ${mnListRes.error.message}`);
+    }
 
     setErrors(errs);
 
@@ -212,7 +258,7 @@ export function SentryNodePage() {
         acts.push({ level: "danger", icon: "⚠️", text: `<strong>Sentry Node error: ${mnStatusRes.value.state}</strong> — check node configuration and ProTx registration.` });
       }
     } else {
-      acts.push({ level: "info", icon: "ℹ️", text: "<strong>Masternode not configured</strong> on this node. If this is a Sentry Node, ensure the node is started with the correct ProTx hash and BLS key." });
+      acts.push({ level: "info", icon: "ℹ️", text: "<strong>Node is not a Sentry Node.</strong> Not registered on-chain." });
     }
 
     setActions(acts);
@@ -220,6 +266,37 @@ export function SentryNodePage() {
   }, [rpcClient, host, networkPorts]);
 
   useEffect(() => { runChecks(); }, [runChecks]);
+
+  const pieData = useMemo(() => {
+    if (!mnList) return [];
+    const counts: Record<string, number> = {};
+    Object.values(mnList).forEach(mn => {
+      counts[mn.status] = (counts[mn.status] || 0) + 1;
+    });
+    
+    const getStatusStyle = (status: string) => {
+      const s = status.toUpperCase();
+      if (s === "ENABLED" || s === "READY") return { color: "#22c55e", gradientStart: "#4ade80", gradientEnd: "#16a34a" }; // success green
+      if (s.includes("POSE_BAN")) return { color: "#eab308", gradientStart: "#facc15", gradientEnd: "#ca8a04" }; // warning amber
+      if (s.includes("NEW_START_REQUIRED")) return { color: "#f59e0b", gradientStart: "#fbbf24", gradientEnd: "#d97706" }; // warn amber
+      if (s.includes("WAITING")) return { color: "#3b82f6", gradientStart: "#60a5fa", gradientEnd: "#2563eb" }; // info blue
+      return { color: "#8b5cf6", gradientStart: "#a78bfa", gradientEnd: "#7c3aed" }; // default purple
+    };
+
+    return Object.entries(counts).map(([label, value]) => ({
+      label,
+      value,
+      ...getStatusStyle(label)
+    }));
+  }, [mnList]);
+
+  const diff24h = useMemo(() => {
+    if (!histStats || histStats.length === 0 || !mnCount) return null;
+    const now = Date.now();
+    const oneDayAgo = now - 24 * 60 * 60 * 1000;
+    const pastStat = histStats.find(s => s.timestamp >= oneDayAgo) || histStats[0];
+    return mnCount.total - pastStat.total;
+  }, [histStats, mnCount]);
 
   // ── Derived check states ──────────────────────────────────────────────────
 
@@ -292,8 +369,17 @@ export function SentryNodePage() {
         </WarningBox>
       )}
 
-      {/* Overall health bar */}
-      <div className="sentry-header-bar">
+      {/* Tabs */}
+      <div className="sentry-tabs">
+        <button className={`sentry-tab ${activeTab === "overview" ? "sentry-tab--active" : ""}`} onClick={() => setActiveTab("overview")}>Overview</button>
+        <button className={`sentry-tab ${activeTab === "mynodes" ? "sentry-tab--active" : ""}`} onClick={() => setActiveTab("mynodes")}>My Nodes</button>
+        <button className={`sentry-tab ${activeTab === "network" ? "sentry-tab--active" : ""}`} onClick={() => setActiveTab("network")}>Network Stats</button>
+      </div>
+
+      {activeTab === "overview" && (
+        <>
+          {/* Overall health bar */}
+          <div className="sentry-header-bar">
         <span className={`sentry-health-dot sentry-health-dot--${overallHealth}`} />
         <div>
           <div className="sentry-health-title">{healthLabel[overallHealth]}</div>
@@ -475,6 +561,128 @@ export function SentryNodePage() {
           ))}
         </div>
       </div>
+        </>
+      )}
+
+      {activeTab === "mynodes" && (
+        <div className="card animate-fade-in">
+          <div className="stat-label mb-4">My Sentry Nodes</div>
+          {myNodes && myNodes.length > 0 ? (
+            <table className="sentry-table">
+              <thead>
+                <tr>
+                  <th>ProTx Hash</th>
+                  <th>Status</th>
+                  <th>Service</th>
+                  <th>Next Payment</th>
+                </tr>
+              </thead>
+              <tbody>
+                {myNodes.map(node => (
+                  <tr key={node.proTxHash}>
+                    <td className="font-mono text-xs">{node.proTxHash.substring(0, 16)}...</td>
+                    <td>
+                      <StatusPill 
+                        state={node.state.PoSePenalty > 0 ? "warn" : "ok"} 
+                        label={node.state.PoSePenalty > 0 ? `PoSe (${node.state.PoSePenalty})` : "Healthy"} 
+                      />
+                    </td>
+                    <td className="font-mono text-xs">{node.state.service}</td>
+                    <td>{node.state.nextPaymentHeight > 0 ? `Block ${node.state.nextPaymentHeight}` : "Waiting"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <div className="text-muted text-sm py-4">No Sentry Nodes found in the currently connected wallet. Ensure your wallet has the ProTx transactions and is unlocked.</div>
+          )}
+        </div>
+      )}
+
+      {activeTab === "network" && (
+        <div className="card animate-fade-in">
+          <div className="stat-label mb-4">Network Status</div>
+          {mnCount ? (
+            <div className="grid-4 mb-6" style={{ gap: "var(--space-4)" }}>
+              <div className="card" style={{ background: "var(--color-bg-base)", border: "1px solid var(--color-border)" }}>
+                <div className="text-muted text-sm mb-1">Total Registered</div>
+                <div className="text-xl font-bold">{mnCount.total.toLocaleString()}</div>
+              </div>
+              <div className="card" style={{ background: "var(--color-bg-base)", border: "1px solid var(--color-border)" }}>
+                <div className="text-muted text-sm mb-1">Active / Enabled</div>
+                <div className="text-xl font-bold text-success">{mnCount.enabled.toLocaleString()}</div>
+              </div>
+              <div className="card" style={{ background: "var(--color-bg-base)", border: "1px solid var(--color-border)" }}>
+                <div className="text-muted text-sm mb-1">Qualifying for Rewards</div>
+                <div className="text-xl font-bold">{mnCount.qualify?.toLocaleString() ?? "—"}</div>
+              </div>
+              <div className="card" style={{ background: "var(--color-bg-base)", border: "1px solid var(--color-border)" }}>
+                <div className="text-muted text-sm mb-1">Joined / Left (24h)</div>
+                <div className={`text-xl font-bold ${diff24h != null && diff24h > 0 ? "text-success" : diff24h != null && diff24h < 0 ? "text-danger" : ""}`}>
+                  {diff24h != null ? (diff24h > 0 ? `+${diff24h}` : diff24h) : "—"}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <p className="text-muted mb-6">Loading network stats...</p>
+          )}
+
+          {mnCount && (
+            <div className="mt-2 mb-6 card" style={{ background: "var(--color-bg-base)", border: "1px solid var(--color-border)", minHeight: "140px" }}>
+              <div className="flex justify-between items-center mb-4 border-b border-[var(--color-border)] pb-2">
+                <div className="font-semibold text-sm">Network Analytics</div>
+                <div style={{ width: "220px" }}>
+                  <CustomDropdown
+                    label=""
+                    value={chartView}
+                    options={[
+                      { value: "health", label: "Node Status", subtitle: "Pie Chart" },
+                      { value: "uptime", label: "Node Age", subtitle: "Histogram" },
+                      { value: "history", label: "History", subtitle: "Line Chart" }
+                    ]}
+                    onChange={(val) => setChartView(val as any)}
+                  />
+                </div>
+              </div>
+              <div className="h-40 w-full mt-4">
+                {chartView === "health" && <StatusPieChart data={pieData} />}
+                {chartView === "uptime" && (mnList ? <UptimeHistogram mnList={mnList} /> : <div className="text-xs text-muted h-full flex items-center justify-center">Loading list...</div>)}
+                {chartView === "history" && <HistoricalLineChart stats={histStats} />}
+              </div>
+            </div>
+          )}
+
+          {mnList && (
+            <div>
+              <div className="stat-label mb-4 mt-6">Recent Nodes</div>
+              <table className="sentry-table">
+                <thead>
+                  <tr>
+                    <th>Address</th>
+                    <th>Status</th>
+                    <th>Version</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.values(mnList).slice(0, 10).map((mn, idx) => (
+                    <tr key={idx}>
+                      <td className="font-mono text-xs">{mn.address}</td>
+                      <td>
+                        <StatusPill 
+                          state={mn.status === "ENABLED" ? "ok" : "warn"} 
+                          label={mn.status} 
+                        />
+                      </td>
+                      <td className="font-mono text-xs">{mn.daemonversion}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div className="text-muted text-xs mt-2 text-center">Showing first 10 nodes from {Object.keys(mnList).length} total nodes in registry.</div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

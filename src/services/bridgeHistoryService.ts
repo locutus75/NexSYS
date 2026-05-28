@@ -30,6 +30,7 @@ export interface BridgeRecord {
   amount: string;              // SYS amount as string
   destAddress: string;
   txid?: string;               // source chain txid
+  destTxid?: string;           // destination chain txid
   status: BridgeStatus;
   statusMessage?: string;
   externalLink?: string;       // link to external tracker

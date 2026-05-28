@@ -29,7 +29,7 @@ import {
 } from "../../services/bridgeHistoryService";
 import { executeUtxoToNevmBridge, fetchSpvProof } from "../../services/bridgeService";
 import { submitSpvProofToNevm, depositEthToRollux } from "../../services/evmBridgeService";
-import type { ChainEnvironment } from "../../types/chain";
+import type { ChainEnvironment, NetworkEnvironment } from "../../types/chain";
 import type { RawWalletInfoFull } from "../../services/syscoinRpcClient";
 import "./BridgePage.css";
 
@@ -141,6 +141,33 @@ function shortAddr(addr: string) {
 
 function shortId(id?: string) {
   return id ? id.slice(0, 10) + "…" + id.slice(-6) : "—";
+}
+
+function getTxExplorerUrl(chain: ChainEnvironment, txid: string, network: NetworkEnvironment): string {
+  if (network === "MAINNET") {
+    switch (chain) {
+      case "SYSCOIN_NATIVE_UTXO":
+        return `https://blockbook.syscoin.org/tx/${txid}`;
+      case "SYSCOIN_NEVM":
+        return `https://explorer.syscoin.org/tx/${txid}`;
+      case "ROLLUX":
+        return `https://explorer.rollux.com/tx/${txid}`;
+      default:
+        return "#";
+    }
+  } else {
+    // TESTNET
+    switch (chain) {
+      case "SYSCOIN_NATIVE_UTXO":
+        return `https://blockbook.tanenbaum.io/tx/${txid}`;
+      case "SYSCOIN_NEVM":
+        return `https://explorer.tanenbaum.io/tx/${txid}`;
+      case "ROLLUX":
+        return `https://rollux.tanenbaum.io/tx/${txid}`;
+      default:
+        return "#";
+    }
+  }
 }
 
 function timeAgo(ts: number) {
@@ -473,17 +500,27 @@ export function BridgePage() {
           }
 
           // 2. Try to fetch and submit SPV proof
-          const { claimNevmToUtxoMint } = await import("../../services/bridgeService");
-          const utxoTxid = await claimNevmToUtxoMint(rpcClient, activeNetwork, rec.txid, rec.destAddress);
-          
-          updateBridgeRecord(activeNetwork, rec.id, {
-            status: "completed",
-            statusMessage: `Success! UTXO mint txid: ${utxoTxid}`
-          });
-          refreshHistory();
+          try {
+            const { claimNevmToUtxoMint } = await import("../../services/bridgeService");
+            const utxoTxid = await claimNevmToUtxoMint(rpcClient, activeNetwork, rec.txid, rec.destAddress);
+            
+            updateBridgeRecord(activeNetwork, rec.id, {
+              status: "completed",
+              statusMessage: "Successfully minted on UTXO chain",
+              destTxid: utxoTxid
+            });
+            refreshHistory();
+          } catch (spvErr: any) {
+            console.debug(`SPV claim attempt for ${rec.txid} failed:`, spvErr);
+            const errMsg = spvErr.message || String(spvErr);
+            // Surface the error to the user if we've reached the threshold but it still fails
+            updateBridgeRecord(activeNetwork, rec.id, {
+              statusMessage: `Waiting for SPV Proof (60/60 confirmations). Error: ${errMsg}`
+            });
+            refreshHistory();
+          }
         } catch (err: any) {
-          // It throws an error if SPV proof is not ready yet or other issues.
-          console.debug(`SPV proof for ${rec.txid} not ready yet or error:`, err);
+          console.debug(`Failed to process SPV polling for ${rec.txid}:`, err);
         }
       }
     };
@@ -727,7 +764,8 @@ export function BridgePage() {
           // After NEVM claim, deposit minted SYS into Rollux L2
           updateBridgeRecord(activeNetwork, rec.id, {
             status: "released",
-            statusMessage: `SYS geclaimd op NEVM (TX: ${evmTxHash.slice(0, 10)}...). Storten op Rollux L2...`
+            statusMessage: "SYS geclaimd op NEVM. Storten op Rollux L2...",
+            destTxid: evmTxHash
           });
           refreshHistory();
 
@@ -738,12 +776,14 @@ export function BridgePage() {
           );
           updateBridgeRecord(activeNetwork, rec.id, {
             status: "completed",
-            statusMessage: `Gestort op Rollux L2 (TX: ${l2TxHash.slice(0, 10)}...)`
+            statusMessage: "Gestort op Rollux L2",
+            destTxid: l2TxHash
           });
         } else {
           updateBridgeRecord(activeNetwork, rec.id, {
             status: "completed",
-            statusMessage: `Geclaimd op NEVM (TX: ${evmTxHash.slice(0, 10)}...)`
+            statusMessage: "Geclaimd op NEVM",
+            destTxid: evmTxHash
           });
         }
         refreshHistory();
@@ -833,6 +873,7 @@ export function BridgePage() {
     if (!passDialogPassword) return;
     if (!pendingClaimRecord && !pendingEvmBurn) return;
     setPassDialogError(null);
+    setBridging(true);
     
     if (pendingEvmBurn) {
       const rec = pendingEvmBurn;
@@ -883,6 +924,8 @@ export function BridgePage() {
             statusMessage: "Failed to execute burn: " + err.message
           });
           refreshHistory();
+        } finally {
+          setBridging(false);
         }
       })();
       return;
@@ -966,13 +1009,15 @@ export function BridgePage() {
           );
           updateBridgeRecord(activeNetwork, rec.id, {
             status: "completed",
-            statusMessage: `Bridge completed on Rollux L2 (L1 TX: ${evmTxHash.slice(0,10)}..., L2 TX: ${l2TxHash.slice(0,10)}...)`
+            statusMessage: "Bridge completed on Rollux L2",
+            destTxid: l2TxHash
           });
           refreshHistory();
         } else {
           updateBridgeRecord(activeNetwork, rec.id, {
             status: "completed",
-            statusMessage: `Bridge completed on Syscoin NEVM (TX: ${evmTxHash.slice(0, 10)}...)`
+            statusMessage: "Bridge completed on Syscoin NEVM",
+            destTxid: evmTxHash
           });
           refreshHistory();
         }
@@ -983,6 +1028,8 @@ export function BridgePage() {
           statusMessage: "Claim failed: " + (err.message || String(err))
         });
         refreshHistory();
+      } finally {
+        setBridging(false);
       }
     })();
   }
@@ -1460,25 +1507,34 @@ export function BridgePage() {
                     if (resumeTxid) {
                       const recordId = makeBridgeId();
                       const txidClean = resumeTxid.trim();
+                      const isEvm = txidClean.startsWith("0x");
+                      
+                      let defaultDest = evmAddress;
+                      if (isEvm) {
+                        defaultDest = walletAddresses.length > 0 ? walletAddresses[0].address : "";
+                      }
+
                       addBridgeRecord(activeNetwork, {
                         id: recordId,
                         timestamp: Date.now(),
                         network: activeNetwork,
-                        sourceChain: "SYSCOIN_NATIVE_UTXO",
-                        destChain: "SYSCOIN_NEVM",
+                        sourceChain: isEvm ? "SYSCOIN_NEVM" : "SYSCOIN_NATIVE_UTXO",
+                        destChain: isEvm ? "SYSCOIN_NATIVE_UTXO" : "SYSCOIN_NEVM",
                         amount: "Loading...",
-                        destAddress: evmAddress,
+                        destAddress: defaultDest,
                         txid: txidClean,
-                        status: "waiting_bridge"
+                        status: isEvm ? "waiting_spv" : "waiting_bridge"
                       });
                       setResumeTxid("");
                       setShowResumeInput(false);
                       refreshHistory();
 
-                      const { amount: resolvedAmount } = await resolveTxDetails(txidClean);
-                      updateBridgeRecord(activeNetwork, recordId, {
-                        amount: resolvedAmount
-                      });
+                      if (!isEvm) {
+                        const { amount: resolvedAmount } = await resolveTxDetails(txidClean);
+                        updateBridgeRecord(activeNetwork, recordId, {
+                          amount: resolvedAmount
+                        });
+                      }
                       refreshHistory();
                     }
                   }}
@@ -1535,29 +1591,81 @@ export function BridgePage() {
                         {shortAddr(rec.destAddress)}
                       </td>
                       <td className="whitespace-nowrap">
-                        {rec.txid ? (
-                          <div
-                            className="font-mono text-xs text-success hover:opacity-80 transition-colors flex items-center gap-2 cursor-pointer whitespace-nowrap"
-                            title="Click to copy full TXID"
-                            onClick={() => {
-                              navigator.clipboard.writeText(rec.txid!);
-                              setCopiedTxid(rec.txid!);
-                              setTimeout(() => setCopiedTxid(null), 2000);
-                            }}
-                          >
-                            <span>{shortId(rec.txid)}</span>
-                            {copiedTxid === rec.txid ? (
-                              <span className="text-[10px]">✓</span>
-                            ) : (
-                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="opacity-80">
-                                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                              </svg>
-                            )}
-                          </div>
-                        ) : (
-                          <span className="text-muted text-xs">—</span>
-                        )}
+                        <div className="flex flex-col gap-1.5 justify-center">
+                          {rec.txid ? (
+                            <div className="flex items-center gap-1.5">
+                              {rec.destTxid && (
+                                <span className="text-[9px] opacity-60 uppercase font-semibold w-7 select-none">Src:</span>
+                              )}
+                              <div
+                                className="font-mono text-xs text-success hover:opacity-80 transition-colors flex items-center gap-1 cursor-pointer"
+                                title="Click to copy source TXID"
+                                onClick={() => {
+                                  navigator.clipboard.writeText(rec.txid!);
+                                  setCopiedTxid(rec.txid!);
+                                  setTimeout(() => setCopiedTxid(null), 2000);
+                                }}
+                              >
+                                <span>{shortId(rec.txid)}</span>
+                                {copiedTxid === rec.txid ? (
+                                  <span className="text-[10px]">✓</span>
+                                ) : (
+                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="opacity-80">
+                                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                                  </svg>
+                                )}
+                              </div>
+                              <a
+                                href={getTxExplorerUrl(rec.sourceChain, rec.txid, rec.network)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-muted hover:text-success text-[11px] transition-colors ml-0.5"
+                                title="View source transaction on explorer"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                ↗
+                              </a>
+                            </div>
+                          ) : (
+                            <span className="text-muted text-xs">—</span>
+                          )}
+
+                          {rec.destTxid && (
+                            <div className="flex items-center gap-1.5 border-t border-white/5 pt-1">
+                              <span className="text-[9px] opacity-60 uppercase font-semibold w-7 select-none">Dest:</span>
+                              <div
+                                className="font-mono text-xs text-success hover:opacity-80 transition-colors flex items-center gap-1 cursor-pointer"
+                                title="Click to copy destination TXID"
+                                onClick={() => {
+                                  navigator.clipboard.writeText(rec.destTxid!);
+                                  setCopiedTxid(rec.destTxid!);
+                                  setTimeout(() => setCopiedTxid(null), 2000);
+                                }}
+                              >
+                                <span>{shortId(rec.destTxid)}</span>
+                                {copiedTxid === rec.destTxid ? (
+                                  <span className="text-[10px]">✓</span>
+                                ) : (
+                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="opacity-80">
+                                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                                  </svg>
+                                )}
+                              </div>
+                              <a
+                                href={getTxExplorerUrl(rec.destChain, rec.destTxid, rec.network)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-muted hover:text-success text-[11px] transition-colors ml-0.5"
+                                title="View destination transaction on explorer"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                ↗
+                              </a>
+                            </div>
+                          )}
+                        </div>
                       </td>
                       <td>
                         <div className="bridge-status-container">
@@ -1641,6 +1749,22 @@ export function BridgePage() {
 
                           {rec.status === "waiting_spv" && (
                             <div className="flex flex-col gap-1 items-stretch" style={{ minWidth: "150px" }}>
+                              {(rec.statusMessage?.toLowerCase().includes("walletpassphrase") || rec.statusMessage?.toLowerCase().includes("passphrase")) && (
+                                <button
+                                  className="btn btn-primary btn-sm"
+                                  style={{ fontSize: "0.7rem", padding: "4px 8px", width: "100%", whiteSpace: "normal" }}
+                                  onClick={() => {
+                                    setPendingBridgeLabel(`Unlock wallet for Gas fee (Bridge to ${CHAIN_LABELS[rec.destChain]})`);
+                                    setPendingBridgeAfterUnlock(() => async () => {
+                                      // Force an immediate refresh/poll attempt after unlock
+                                      refreshHistory();
+                                    });
+                                    setUnlockDialogOpen(true);
+                                  }}
+                                >
+                                  Gasfee Payment request
+                                </button>
+                              )}
                               <button
                                 className="btn btn-secondary btn-sm"
                                 style={{ fontSize: "0.7rem", padding: "4px 8px", width: "100%" }}
@@ -1835,6 +1959,7 @@ export function BridgePage() {
           setPendingEvmBurn(null);
           setClaimStep(null);
           setClaimBlockInfo(null);
+          setBridging(false);
         }}
       />
 

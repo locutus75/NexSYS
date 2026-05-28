@@ -27,8 +27,8 @@ export const SYSCOIN_ERC20_MANAGER_ABI = [
 
 // SyscoinERC20Manager addresses on Syscoin NEVM
 export const SYSCOIN_ERC20_MANAGER_ADDRESS: Record<string, string> = {
-  MAINNET: "0x6100c8e9d564f045c742c38865611f71193484cf",
-  TESTNET: "0x6100c8e9d564f045c742c38865611f71193484cf", // TODO: Update with correct Tanenbaum address if different
+  MAINNET: "0x7904299b3D3dC1b03d1DdEb45E9fDF3576aCBd5f",
+  TESTNET: "0x7904299b3D3dC1b03d1DdEb45E9fDF3576aCBd5f", // Syscoin ERC20 Manager is at the same address on Tanenbaum
 };
 
 // L1StandardBridgeProxy addresses on Syscoin NEVM
@@ -429,7 +429,16 @@ export async function executeNevmToUtxoBurn(
   const tokenId = 0;
 
   try {
-    const tx = await contract.freezeBurn(amountWei, assetAddr, tokenId, utxoAddress, { value: amountWei });
+    // Structural fix for the syscoinjs-lib TxRoot mismatch bug!
+    // By forcing the transaction to be a Legacy (Type 0) transaction instead of EIP-1559,
+    // the outdated eth-proof library inside syscoinjs-lib can correctly calculate the
+    // Merkle TxRoot and generate the SPV proof client-side without errors.
+    const feeData = await signer.provider?.getFeeData();
+    const tx = await contract.freezeBurn(amountWei, assetAddr, tokenId, utxoAddress, { 
+      value: amountWei,
+      type: 0,
+      gasPrice: feeData?.gasPrice
+    });
     const receipt = await tx.wait();
     return receipt.hash;
   } catch (err: any) {

@@ -33,10 +33,33 @@ async function fetchUtxos(
 
   // Try local node first (requires wallet to be unlocked or address in wallet)
   try {
+    // 1. Get locked UTXOs and Sentry collateral addresses to exclude them
+    const lockedRes = await rpcClient.listLockUnspent();
+    const lockedUtxos = new Set(
+      lockedRes.ok ? lockedRes.value.map(l => `${l.txid}:${l.vout}`) : []
+    );
+
+    const protxRes = await rpcClient.protxList("wallet", true);
+    const collateralAddresses = new Set<string>();
+    if (protxRes.ok && Array.isArray(protxRes.value)) {
+      protxRes.value.forEach((mn: any) => {
+        if (mn.collateralAddress) collateralAddresses.add(mn.collateralAddress);
+        if (mn.collateralHash && mn.collateralIndex !== undefined) {
+          lockedUtxos.add(`${mn.collateralHash}:${mn.collateralIndex}`);
+        }
+      });
+    }
+
     const addressesParam = address ? [address] : [];
     const listUnspentRes = await rpcClient.call<any[]>("listunspent", [1, 9999999, addressesParam]);
     if (listUnspentRes.ok && Array.isArray(listUnspentRes.value)) {
-      utxosList = listUnspentRes.value.map(utxo => {
+      utxosList = listUnspentRes.value
+        .filter(utxo => {
+          const isLocked = lockedUtxos.has(`${utxo.txid}:${utxo.vout}`);
+          const isCollateral = utxo.address && collateralAddresses.has(utxo.address);
+          return !isLocked && !isCollateral;
+        })
+        .map(utxo => {
         const item: any = {
           txid: utxo.txid,
           vout: utxo.vout,
@@ -139,12 +162,14 @@ export async function executeUtxoToNevmBridge(
   const syscoinjs = new SyscoinJSLib(null, blockbookUrl, sysNetwork);
 
   // Fetch UTXOs (returns { utxos, assets })
-  const blockbookUtxos = await fetchUtxos(rpcClient, network, sourceAddress);
+  // We fetch ALL UTXOs from the wallet so it can find SYS for gas and the required asset
+  const utxoRes = await fetchUtxos(rpcClient, network, "");
 
   // Setup options for syscoinjs-lib
   const txOpts = { rbf: true };
   const amountSats = Math.floor(amountSys * 1e8);
   const feeRate = new BN(10); // 10 sat/byte
+  const assetGuid = "123456";
 
   // Fetch a change address if sourceAddress is empty
   let changeAddress = sourceAddress;
@@ -159,14 +184,13 @@ export async function executeUtxoToNevmBridge(
 
   // Calculate existing SYSX (GUID 123456) balance
   let sysxBalanceSats = 0;
-  for (const utxo of blockbookUtxos.utxos) {
+  for (const utxo of utxoRes.utxos) {
     if (utxo.assetInfo && utxo.assetInfo.assetGuid === "123456") {
       sysxBalanceSats += Number(utxo.assetInfo.value);
     }
   }
 
   const isConversion = sysxBalanceSats < amountSats;
-  const assetGuid = "123456";
 
   const assetMap = new Map([
     [assetGuid, { outputs: [{ value: new BN(amountSats) }] }]
@@ -191,7 +215,7 @@ export async function executeUtxoToNevmBridge(
         changeAddress,
         feeRate,
         sourceAddress,
-        blockbookUtxos,
+        utxoRes,
         null
       );
     } else {
@@ -206,7 +230,7 @@ export async function executeUtxoToNevmBridge(
         changeAddress,
         feeRate,
         sourceAddress,
-        blockbookUtxos,
+        utxoRes,
         null
       );
     }
@@ -238,6 +262,95 @@ export async function executeUtxoToNevmBridge(
 }
 
 /**
+ * Converts SYSX back to native SYS.
+ * Uses syscoinjs.assetAllocationBurn with empty ethaddress.
+ */
+export async function convertSysxToNative(
+  rpcClient: SyscoinRpcClient,
+  network: NetworkEnvironment,
+  amountSys: number,
+  changeAddress?: string
+): Promise<string> {
+  const blockbookUrl = network === "MAINNET" ? MAINNET_BLOCKBOOK : TESTNET_BLOCKBOOK;
+  const sysNetwork = network === "MAINNET" ? syscoinUtils.syscoinNetworks.mainnet : syscoinUtils.syscoinNetworks.testnet;
+  const syscoinjs = new SyscoinJSLib(null, blockbookUrl, sysNetwork);
+
+  // Fetch UTXOs (returns { utxos, assets })
+  const utxoRes = await fetchUtxos(rpcClient, network, "");
+
+  // Setup options for syscoinjs-lib
+  const txOpts = { rbf: true };
+  const amountSats = Math.round(amountSys * 1e8);
+  const feeRate = new BN(10); // 10 sat/byte
+  const assetGuid = "123456";
+
+  // Fetch a change address if not provided
+  let changeAddr = changeAddress;
+  if (!changeAddr) {
+    const addrRes = await rpcClient.call<string>("getnewaddress", [""]);
+    if (addrRes.ok && addrRes.value) {
+      changeAddr = addrRes.value;
+    } else {
+      throw new Error("Could not generate a change address from the node.");
+    }
+  }
+
+  const assetMap = new Map([
+    [assetGuid, { outputs: [{ value: new BN(amountSats) }] }]
+  ]);
+
+  let psbtResult;
+  try {
+    // Monkey-patch syscoinjs-lib's fetchBackendRawTx to use our local RPC node instead of Blockbook
+    syscoinUtils.fetchBackendRawTx = async (_backendUrl: string, txid: string) => {
+      const txRes = await rpcClient.call<string>("getrawtransaction", [txid]);
+      if (txRes.ok && txRes.value) {
+        return { hex: txRes.value };
+      }
+      return null;
+    };
+
+    // To convert SYSX back to native SYS, we use assetAllocationBurn with empty ethaddress.
+    const assetOpts = {
+      ethaddress: Buffer.alloc(0)
+    };
+    psbtResult = await syscoinjs.assetAllocationBurn(
+      assetOpts,
+      txOpts,
+      assetMap,
+      changeAddr,
+      feeRate,
+      "", // sysFromXpubOrAddress (can be empty string)
+      utxoRes,
+      null
+    );
+  } catch (err: any) {
+    throw new Error(`Failed to create PSBT: ${err.message}`);
+  }
+
+  const psbtBase64 = psbtResult.psbt.toBase64();
+
+  // Sign PSBT with local node
+  const signRes = await rpcClient.call<any>("walletprocesspsbt", [psbtBase64, true, "ALL", true]);
+  if (!signRes.ok) {
+    throw new Error(`Node failed to sign PSBT: ${signRes.error?.message || "Unknown error"}`);
+  }
+  if (!signRes.value.complete) {
+    throw new Error("PSBT signing incomplete. Is your wallet unlocked?");
+  }
+
+  // Extract raw hex and broadcast
+  const signedHex = signRes.value.hex;
+  const sendRes = await rpcClient.call<string>("sendrawtransaction", [signedHex]);
+  
+  if (!sendRes.ok) {
+    throw new Error(`Failed to broadcast transaction: ${sendRes.error?.message || "Unknown error"}`);
+  }
+
+  return sendRes.value;
+}
+
+/**
  * Claims SYS on UTXO after a burn on NEVM (NEVM -> UTXO).
  * Uses syscoinjs.assetAllocationMint with the EVM transaction ID and a Web3 RPC URL to generate the proof.
  */
@@ -262,17 +375,18 @@ export async function claimNevmToUtxoMint(
     web3url: web3url
   };
 
+  // Pre-validate the SPV proof to catch any internal syscoinjs-lib errors
+  // (like the known "TxRoot mismatch" with typed EVM transactions)
+  const ethProof = await syscoinUtils.buildEthProof(assetOpts);
+  if (ethProof instanceof Error) {
+    throw new Error(`SPV Proof Generation Failed: ${ethProof.message}`);
+  }
+
   const txOpts = { rbf: true };
   const feeRate = new syscoinUtils.BN(10);
-  
   // We need UTXOs to pay for the Syscoin transaction fee
-  const utxoRes = await fetchUtxos(rpcClient, network, destUtxoAddress);
-  const blockbookUtxos = utxoRes.utxos.map((u: any) => ({
-    txId: u.txid,
-    vout: u.vout,
-    value: new syscoinUtils.BN(u.value),
-    address: destUtxoAddress,
-  }));
+  // We fetch ALL UTXOs from the wallet (not just destUtxoAddress) so it can find SYS for gas
+  const utxoRes = await fetchUtxos(rpcClient, network, "");
 
   console.log(`Calling assetAllocationMint for ${ethtxid} using web3url ${web3url}`);
   
@@ -285,7 +399,7 @@ export async function claimNevmToUtxoMint(
       destUtxoAddress, // sysChangeAddress
       feeRate,
       destUtxoAddress, // sysFromXpubOrAddress
-      blockbookUtxos,
+      utxoRes, 
       null
     );
   } catch (err: any) {

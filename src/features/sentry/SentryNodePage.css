@@ -154,3 +154,118 @@
 .action-icon { font-size: 1.1rem; flex-shrink: 0; margin-top: 1px; }
 .action-text { font-size: var(--text-sm); color: var(--color-text-secondary); }
 .action-text strong { color: var(--color-text-primary); }
+
+.sentry-tabs {
+  display: flex;
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+  border-bottom: 1px solid var(--color-border);
+  padding-bottom: var(--space-2);
+}
+
+.sentry-tab {
+  background: none;
+  border: none;
+  color: var(--color-text-muted);
+  font-size: var(--text-md);
+  font-weight: var(--font-semibold);
+  cursor: pointer;
+  padding: var(--space-2) var(--space-3);
+  position: relative;
+}
+
+.sentry-tab:hover {
+  color: var(--color-text-primary);
+}
+
+.sentry-tab--active {
+  color: var(--color-accent);
+}
+
+.sentry-tab--active::after {
+  content: "";
+  position: absolute;
+  bottom: calc(-1 * var(--space-2) - 1px);
+  left: 0;
+  width: 100%;
+  height: 2px;
+  background: var(--color-accent);
+}
+
+.sentry-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.sentry-table th {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.sentry-table td {
+  font-size: var(--text-sm);
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.sentry-tabs {
+  display: flex;
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+  border-bottom: 1px solid var(--color-border);
+  padding-bottom: var(--space-2);
+}
+
+.sentry-tab {
+  background: none;
+  border: none;
+  color: var(--color-text-muted);
+  font-size: var(--text-md);
+  font-weight: var(--font-semibold);
+  cursor: pointer;
+  padding: var(--space-2) var(--space-3);
+  position: relative;
+}
+
+.sentry-tab:hover {
+  color: var(--color-text-primary);
+}
+
+.sentry-tab--active {
+  color: var(--color-accent);
+}
+
+.sentry-tab--active::after {
+  content: '';
+  position: absolute;
+  bottom: calc(-1 * var(--space-2) - 1px);
+  left: 0;
+  width: 100%;
+  height: 2px;
+  background: var(--color-accent);
+}
+
+.sentry-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.sentry-table th {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.sentry-table td {
+  font-size: var(--text-sm);
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+

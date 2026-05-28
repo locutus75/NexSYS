@@ -10,6 +10,7 @@ import { ChainBadge } from "../../components/shared/ChainBadge";
 import { WarningBox } from "../../components/shared/WarningBox";
 import { useNetworkStore } from "../../store/networkStore";
 import { fetchAllEvmBalances } from "../../services/evmRpcClient";
+import { convertSysxToNative } from "../../services/bridgeService";
 import "./WhereIsMySysPage.css";
 
 // ── Chain definitions ─────────────────────────────────────────────────────────
@@ -40,10 +41,34 @@ export function WhereIsMySysPage() {
   const [evmLoading,    setEvmLoading]    = useState(false);
   const [evmErrors,     setEvmErrors]     = useState<string[]>([]);
 
+  const [sysxBalance,        setSysxBalance]        = useState<string | null>(null);
+  const [convertAmount,      setConvertAmount]      = useState<string>("");
+  const [amountError,        setAmountError]        = useState<string | null>(null);
+  const [walletInfo,         setWalletInfo]         = useState<any>(null);
+  const [unlockDialogOpen,   setUnlockDialogOpen]   = useState(false);
+  const [passphrase,         setPassphrase]         = useState("");
+  const [unlockError,        setUnlockError]        = useState<string | null>(null);
+  const [unlockTimeout]                             = useState("60");
+  const [unlocking,          setUnlocking]          = useState(false);
+  const [converting,         setConverting]         = useState(false);
+  const [convertError,       setConvertError]       = useState<string | null>(null);
+  const [convertSuccessTxid, setConvertSuccessTxid] = useState<string | null>(null);
+
   const fetchAll = useCallback(async () => {
     // UTXO
     setUtxoLoading(true);
     setUtxoError(null);
+
+    // Fetch wallet info (for lock status)
+    try {
+      const walletRes = await rpcClient.getWalletInfoFull();
+      if (walletRes.ok) {
+        setWalletInfo(walletRes.value);
+      }
+    } catch (e) {
+      console.warn("Failed to fetch wallet info:", e);
+    }
+
     const res = await rpcClient.getBalances();
     if (res.ok) {
       const n = res.value.mine.trusted;
@@ -51,6 +76,39 @@ export function WhereIsMySysPage() {
     } else {
       setUtxoError(res.error?.message ?? "Could not fetch UTXO balance.");
     }
+
+    // Fetch SYSX unspent allocations
+    try {
+      const unspentRes = await rpcClient.listUnspent(1, 9999999);
+      if (unspentRes.ok && Array.isArray(unspentRes.value)) {
+        let totalSysx = 0;
+        for (const utxo of unspentRes.value) {
+          const guid = (utxo as any).asset_guid !== undefined ? (utxo as any).asset_guid : (utxo as any).assetguid;
+          if (guid && guid.toString() === "123456") {
+            const amount = (utxo as any).asset_amount !== undefined ? (utxo as any).asset_amount : (utxo as any).assetamount;
+            totalSysx += Number(amount);
+          }
+        }
+        const formattedBalance = totalSysx > 0 ? totalSysx.toFixed(8).replace(/\.?0+$/, "") : "0";
+        setSysxBalance(formattedBalance);
+        
+        // Default the input amount if it hasn't been set yet or exceeds current balance
+        setConvertAmount(prev => {
+          if (!prev || parseFloat(prev) === 0 || parseFloat(prev) > totalSysx) {
+            return formattedBalance;
+          }
+          return prev;
+        });
+      } else {
+        setSysxBalance("0");
+        setConvertAmount("0");
+      }
+    } catch (e) {
+      console.warn("Failed to fetch SYSX unspent UTXOs:", e);
+      setSysxBalance("0");
+      setConvertAmount("0");
+    }
+
     setUtxoLoading(false);
 
     // EVM
@@ -66,6 +124,97 @@ export function WhereIsMySysPage() {
   }, [rpcClient, activeNetwork, evmAddress]);
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
+
+  const handleUnlock = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setUnlocking(true);
+    setUnlockError(null);
+    try {
+      const res = await rpcClient.call<null>("walletpassphrase", [
+        passphrase,
+        parseInt(unlockTimeout, 10),
+      ]);
+      if (res.ok) {
+        setUnlockDialogOpen(false);
+        setPassphrase("");
+        const info = await rpcClient.getWalletInfoFull();
+        if (info.ok) setWalletInfo(info.value);
+        // Continue to conversion after successful unlock
+        await executeConversion();
+      } else {
+        setUnlockError(res.error?.message ?? "Invalid passphrase.");
+      }
+    } catch (err: any) {
+      setUnlockError(err.message || "Failed to unlock wallet.");
+    } finally {
+      setUnlocking(false);
+    }
+  };
+
+  const handleAmountChange = (val: string) => {
+    let sanitized = val.replace(/,/g, '.');
+    sanitized = sanitized.replace(/[^0-9.]/g, '');
+    const parts = sanitized.split('.');
+    if (parts.length > 2) {
+      sanitized = parts[0] + '.' + parts.slice(1).join('');
+    }
+
+    setConvertAmount(sanitized);
+
+    if (!sanitized) {
+      setAmountError("Amount is required.");
+      return;
+    }
+    const num = parseFloat(sanitized);
+    if (isNaN(num) || num <= 0) {
+      setAmountError("Please enter a valid positive number.");
+      return;
+    }
+    const total = parseFloat(sysxBalance || "0");
+    if (num > total) {
+      setAmountError(`Cannot exceed available balance of ${total} SYSX.`);
+      return;
+    }
+    setAmountError(null);
+  };
+
+  const executeConversion = async () => {
+    if (!convertAmount || parseFloat(convertAmount) <= 0 || amountError) return;
+    setConverting(true);
+    setConvertError(null);
+    setConvertSuccessTxid(null);
+    try {
+      const amountNum = parseFloat(convertAmount);
+      const txid = await convertSysxToNative(
+        rpcClient,
+        activeNetwork,
+        amountNum
+      );
+      setConvertSuccessTxid(txid);
+      setSysxBalance("0");
+      setConvertAmount("");
+      await fetchAll();
+    } catch (err: any) {
+      const errMsg = err.message || "Unknown error";
+      if (errMsg.toLowerCase().includes("walletpassphrase") || errMsg.toLowerCase().includes("locked")) {
+        setUnlockDialogOpen(true);
+      } else {
+        setConvertError(`Failed to convert: ${errMsg}`);
+      }
+    } finally {
+      setConverting(false);
+    }
+  };
+
+  const handleConvertClick = async () => {
+    setConvertError(null);
+    setConvertSuccessTxid(null);
+    if (walletInfo && walletInfo.unlocked_until === 0) {
+      setUnlockDialogOpen(true);
+    } else {
+      await executeConversion();
+    }
+  };
 
   const isTestnet = activeNetwork !== "MAINNET";
 
@@ -174,6 +323,82 @@ export function WhereIsMySysPage() {
         </WarningBox>
       )}
 
+      {sysxBalance && parseFloat(sysxBalance) > 0 && (
+        <WarningBox severity="info" title="Wrapped SYS (SYSX) Detected" className="mb-6">
+          <div className="flex flex-col gap-3" style={{ textAlign: "left" }}>
+            <p>
+              We found <strong>{sysxBalance} SYSX</strong> in your native UTXO wallet. 
+              This is wrapped SYS (typically received from a bridge claim). 
+              To spend these funds as standard Syscoin, they must be converted back to native SYS.
+            </p>
+            
+            <div className="flex flex-col gap-2" style={{ maxWidth: "360px", width: "100%" }}>
+              <label htmlFor="sysx-convert-amount" className="text-xs font-semibold text-muted">
+                AMOUNT TO CONVERT
+              </label>
+              <div className="flex gap-2">
+                <div className="wims-input-container">
+                  <input
+                    id="sysx-convert-amount"
+                    type="text"
+                    inputMode="decimal"
+                    className="input input-mono w-full btn-sm"
+                    style={{ height: "36px", paddingRight: "4.5rem" }}
+                    placeholder="0.00000000"
+                    value={convertAmount}
+                    onChange={(e) => handleAmountChange(e.target.value)}
+                    disabled={converting}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm wims-max-btn"
+                    onClick={() => handleAmountChange(sysxBalance)}
+                    disabled={converting}
+                  >
+                    Max
+                  </button>
+                </div>
+                <button
+                  className="btn btn-primary btn-sm"
+                  style={{ height: "36px" }}
+                  onClick={handleConvertClick}
+                  disabled={converting || !!amountError || !convertAmount || parseFloat(convertAmount) <= 0}
+                >
+                  {converting ? (
+                    <div className="flex items-center gap-2">
+                      <div className="spinner" style={{ width: "12px", height: "12px", borderWidth: "2px" }} />
+                      <span>Converting…</span>
+                    </div>
+                  ) : (
+                    "Convert"
+                  )}
+                </button>
+              </div>
+              {amountError && (
+                <div className="text-danger text-xs font-semibold mt-1">
+                  ⚠️ {amountError}
+                </div>
+              )}
+            </div>
+          </div>
+        </WarningBox>
+      )}
+
+      {convertSuccessTxid && (
+        <WarningBox severity="success" title="Conversion successful!" className="mb-6">
+          <div style={{ textAlign: "left" }}>
+            Successfully converted SYSX back to native SYS.<br />
+            <strong>Transaction ID:</strong> <span className="font-mono text-xs break-all">{convertSuccessTxid}</span>
+          </div>
+        </WarningBox>
+      )}
+
+      {convertError && (
+        <WarningBox severity="danger" title="Conversion failed" className="mb-6">
+          <div style={{ textAlign: "left" }}>{convertError}</div>
+        </WarningBox>
+      )}
+
       {!evmAddress && (
         <WarningBox severity="info" title="0x address not set" className="mb-6">
           NEVM and Rollux balances require your Ethereum-compatible address.{" "}
@@ -273,6 +498,67 @@ export function WhereIsMySysPage() {
           </div>
         ))}
       </div>
+
+      {unlockDialogOpen && (
+        <div className="dialog-overlay" onClick={() => setUnlockDialogOpen(false)} role="presentation">
+          <form
+            className="dialog animate-fade-in"
+            onSubmit={handleUnlock}
+            onClick={(e) => e.stopPropagation()}
+            style={{ width: "100%", maxWidth: "420px" }}
+          >
+            <div className="dialog__header">
+              <span className="dialog__icon">🔑</span>
+              <h3 className="dialog__title">Unlock Node Wallet for Conversion</h3>
+            </div>
+            <p className="dialog__desc" style={{ marginBottom: "var(--space-4)", fontSize: "0.85rem", color: "var(--color-text-secondary)" }}>
+              Enter your <strong>Syscoin UTXO Node Passphrase</strong> to unlock your local wallet and execute the SYSX conversion.
+            </p>
+            
+            <div className="form-group" style={{ textAlign: "left", width: "100%", marginBottom: "var(--space-3)" }}>
+              <input
+                type="password"
+                className="input input-mono w-full"
+                placeholder="Node Wallet Passphrase"
+                value={passphrase}
+                onChange={(e) => {
+                  setPassphrase(e.target.value);
+                  setUnlockError(null);
+                }}
+                autoFocus
+                required
+              />
+              {unlockError && (
+                <div className="text-danger text-xs mt-2 font-semibold">
+                  ⚠️ {unlockError}
+                </div>
+              )}
+            </div>
+            
+            <div className="dialog__actions" style={{ display: "flex", gap: "10px", justifyContent: "flex-end", width: "100%" }}>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={() => {
+                  setUnlockDialogOpen(false);
+                  setPassphrase("");
+                  setUnlockError(null);
+                }}
+                disabled={unlocking}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="btn btn-primary btn-sm"
+                disabled={unlocking || !passphrase}
+              >
+                {unlocking ? "Unlocking…" : "Unlock & Convert"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 }
