@@ -118,7 +118,6 @@ export default defineConfig(async () => ({
   },
 
   define: {
-    "require('immediate')": "(function(task, ...args) { setTimeout(() => task(...args), 0); })"
   },
 
   optimizeDeps: {
